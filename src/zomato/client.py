@@ -579,14 +579,20 @@ class ZomatoClient:
         self,
         city: str = "gurugram",
         category: str = "",
+        when: str = "",
     ) -> list[dict]:
         """Get events from District by Zomato.
 
         Scrapes the District events page (Next.js RSC) and extracts
-        event data including titles, venues, cities, and categories.
+        event data including titles, venues, cities, dates, and descriptions.
 
-        Returns list of event dicts with keys: title, venue, city,
-        category, image_url, url.
+        Args:
+            city: Filter by city name (empty = all cities)
+            category: Filter by category/genre
+            when: Filter by date — 'today', 'tomorrow', 'weekend', or 'YYYY-MM-DD'
+
+        Returns list of event dicts with keys: title, venue, city, date,
+        description, start_epoch, end_epoch.
         """
         url = f"{ep.DISTRICT_BASE}{ep.DISTRICT_EVENTS_PAGE}"
         resp = self._session.get(url, headers={"User-Agent": USER_AGENT})
@@ -594,6 +600,10 @@ class ZomatoClient:
         html = resp.text
 
         events = self._parse_district_events(html)
+
+        # Filter by date if specified
+        if when:
+            events = self._filter_events_by_when(events, when)
 
         # Filter by city if specified
         if city:
@@ -746,6 +756,10 @@ class ZomatoClient:
             epoch_m = re.search(r'"start_time_epoch"\s*:\s*"?(\d+)"?', block)
             epoch = int(epoch_m.group(1)) if epoch_m else 0
 
+            # Extract end_time_epoch for date filtering
+            end_epoch_m = re.search(r'"end_time_epoch"\s*:\s*"?(\d+)"?', block)
+            end_epoch = int(end_epoch_m.group(1)) if end_epoch_m else 0
+
             # Extract image
             img_m = re.search(r'"(https://cdn\.district\.in/assets/events/[^"]+)"', block)
             if not img_m:
@@ -763,12 +777,74 @@ class ZomatoClient:
                 "image_url": image_url,
                 "url": f"{ep.DISTRICT_BASE}/events/{slug}" if slug else "",
                 "start_epoch": epoch,
+                "end_epoch": end_epoch,
             })
 
         # Sort by start_epoch (earliest first, 0 = unknown goes last)
         events.sort(key=lambda e: (e["start_epoch"] == 0, e["start_epoch"]))
 
         return events
+
+    def _filter_events_by_when(self, events: list[dict], when: str) -> list[dict]:
+        """Filter events by date keyword or ISO date.
+
+        Supports: 'today', 'tomorrow', 'weekend' (Sat-Sun),
+        or a specific date like '2026-08-01'.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        # Use Indian timezone
+        ist = timezone(timedelta(hours=5, minutes=30))
+        now = datetime.now(ist)
+
+        when_lower = when.lower().strip()
+
+        if when_lower == "today":
+            target_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            target_end = target_start + timedelta(days=1)
+        elif when_lower == "tomorrow":
+            target_start = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            target_end = target_start + timedelta(days=1)
+        elif when_lower == "weekend":
+            # Find upcoming Saturday
+            days_until_sat = (5 - now.weekday()) % 7
+            if days_until_sat == 0 and now.weekday() == 5:
+                # It's Saturday already
+                days_until_sat = 0
+            target_start = (now + timedelta(days=days_until_sat)).replace(hour=0, minute=0, second=0, microsecond=0)
+            target_end = target_start + timedelta(days=2)  # Sat + Sun
+        else:
+            # Try parsing as YYYY-MM-DD
+            try:
+                target_start = datetime.strptime(when, "%Y-%m-%d").replace(tzinfo=ist)
+                target_end = target_start + timedelta(days=1)
+            except ValueError:
+                return events  # Invalid date format — return unfiltered
+
+        target_start_ts = target_start.timestamp()
+        target_end_ts = target_end.timestamp()
+
+        filtered = []
+        for e in events:
+            start = e.get("start_epoch", 0)
+            end = e.get("end_epoch", 0)
+            if start == 0:
+                # No epoch — check date_string for keywords
+                date_str = e.get("date", "").lower()
+                if when_lower == "today" and "today" in date_str:
+                    filtered.append(e)
+                elif when_lower == "tomorrow" and "tomorrow" in date_str:
+                    filtered.append(e)
+                elif when_lower == "weekend" and ("sat" in date_str or "sun" in date_str or "weekend" in date_str):
+                    filtered.append(e)
+                continue
+            if end == 0:
+                end = start + 86400  # Assume 24h if no end
+            # Event overlaps with target date range
+            if start < target_end_ts and end > target_start_ts:
+                filtered.append(e)
+
+        return filtered
 
     # ── Public API: Dining ────────────────────────────────────────
 
