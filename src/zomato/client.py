@@ -710,6 +710,74 @@ class ZomatoClient:
         seen_names: set[str] = set()
 
         for block in item_blocks:
+            # ── Type 1: VenueData — venue with next_event_details ──
+            if '"VenueData":{' in block:
+                # Extract venue name — it's the first "name" field right after VenueData
+                venue_name_m = re.search(
+                    r'"VenueData"\s*:\s*\{[^{]*?"name"\s*:\s*"([^"]+)"', block
+                )
+                if not venue_name_m:
+                    continue
+                venue_name = venue_name_m.group(1)
+
+                # Extract next_event_details
+                next_name_m = re.search(
+                    r'"next_event_details"\s*:\s*\{[^}]*"name"\s*:\s*"([^"]+)"', block
+                )
+                if not next_name_m:
+                    continue  # Venue with no upcoming event
+                event_name = next_name_m.group(1)
+
+                next_date_m = re.search(
+                    r'"next_event_details"\s*:\s*\{[^}]*"date_string"\s*:\s*"([^"]+)"', block
+                )
+                date_str = next_date_m.group(1).replace("\\u0026", "&") if next_date_m else ""
+
+                addr_m = re.search(r'"address"\s*:\s*"([^"]+)"', block)
+                desc_m = re.search(r'"description"\s*:\s*"([^"]+)"', block)
+
+                # Guess city from address
+                addr = addr_m.group(1) if addr_m else ""
+                city = ""
+                for c in ["Gurugram", "Gurgaon", "Noida", "Delhi", "Faridabad", "Ghaziabad"]:
+                    if c.lower() in addr.lower():
+                        city = "Gurugram" if c == "Gurgaon" else c
+                        if city == "Delhi":
+                            city = "Delhi/NCR"
+                        break
+
+                # Dedup by event_name+venue
+                dedup_key = f"{event_name}|{venue_name}"
+                if dedup_key in seen_names:
+                    continue
+                seen_names.add(dedup_key)
+
+                events.append({
+                    "title": event_name,
+                    "venue": venue_name,
+                    "city": city,
+                    "locality": "",
+                    "date": date_str,
+                    "description": desc_m.group(1) if desc_m else "",
+                    "tag_line": "",
+                    "category": "",
+                    "price": "",
+                    "min_price": 0,
+                    "rating": "",
+                    "review_count": 0,
+                    "image_url": "",
+                    "url": "",
+                    "start_epoch": 0,
+                    "end_epoch": 0,
+                    "is_activity": False,
+                    "address": addr,
+                })
+                continue
+
+            # ── Type 2: EventData — full event with venue_name ──
+            if '"EventData":{' not in block:
+                continue  # Skip ArtistData, EditorialData, etc.
+
             # Extract name
             name_m = re.search(r'"name"\s*:\s*"([^"]{3,200})"', block)
             if not name_m:
@@ -804,6 +872,7 @@ class ZomatoClient:
                 "start_epoch": epoch,
                 "end_epoch": end_epoch,
                 "is_activity": is_activity,
+                "address": "",
             })
 
         # Sort by start_epoch (earliest first, 0 = unknown goes last)
@@ -914,6 +983,7 @@ class ZomatoClient:
                     "restaurant": venue,
                     "locality": e.get("locality", ""),
                     "city": e.get("city", ""),
+                    "address": e.get("address", ""),
                     "events": [],
                 }
             by_venue[venue]["events"].append({

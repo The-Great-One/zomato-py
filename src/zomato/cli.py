@@ -168,6 +168,8 @@ def cmd_restaurant_events(args: argparse.Namespace) -> None:
         print(f"  {i}. {r['restaurant']}")
         if r.get("locality"):
             print(f"     📍 {r['locality']}, {r.get('city', '')}")
+        elif r.get("address"):
+            print(f"     📍 {r['address']}")
         for ev in r.get("events", []):
             line = f"     → {ev['title']}"
             if ev.get("date"):
