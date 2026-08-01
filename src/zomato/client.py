@@ -329,46 +329,116 @@ class ZomatoClient:
         context: str = "delivery",
         lat: float | None = None,
         lng: float | None = None,
+        cuisine: str | None = None,
     ) -> list[dict]:
         """Search for restaurants in a city.
+
+        Uses the server-rendered ``__PRELOADED_STATE__`` from Zomato's
+        curated listing pages, which are **not** IP-scoped unlike the
+        ``getPage`` webroute.  When *cuisine* is provided, fetches the
+        cuisine-specific listing page (e.g. ``/ncr/restaurants/burger``)
+        and the "best <city> <cuisine>" page, deduplicates, and returns
+        up to ~30 unique results.
 
         Args:
             city: City name slug (e.g. 'gurugram', 'delhi', 'mumbai')
             context: 'delivery', 'dineout', or 'nightlife'
-            lat/lng: Override location coordinates
+            lat/lng: Override location coordinates (unused by SSR fetch
+                but accepted for API compatibility)
+            cuisine: Optional cuisine filter (e.g. 'burger', 'pizza')
 
         Returns list of restaurant dicts with keys:
             resId, name, cuisine, rating, rating_text, cost_for_two,
             image_url, url, locality, is_promoted
         """
-        # Update location to match the city being searched
         city_lower = city.lower().replace(" ", "")
         if city_lower in CITY_IDS:
             self.location.city_id = CITY_IDS[city_lower]
             self.location.city_name = city.title()
 
-        if lat is None:
-            lat = self.location.lat
-        if lng is None:
-            lng = self.location.lng
+        # Build candidate URLs — SSR pages embed results in __PRELOADED_STATE__
+        ncr_cities = {"gurugram", "noida", "faridabad", "delhi"}
+        base = "/ncr" if city_lower in ncr_cities else f"/{city}"
+        city_display = "gurgaon" if city_lower == "gurugram" else city_lower
 
-        url_path = f"/{city}/restaurants"
-        if context == "delivery":
-            url_path = f"/{city}/restaurants?order-online=1"
-        elif context == "dineout":
-            url_path = f"/{city}/dine-out"
-        elif context == "nightlife":
-            url_path = f"/{city}/nightlife"
+        urls: list[str] = []
+        if cuisine:
+            slug = cuisine.lower().replace(" ", "-")
+            # Best <city> <cuisine> restaurants (curated, highest-rated)
+            urls.append(f"https://www.zomato.com{base}/best-{city_display}-{slug}-restaurants")
+            # Generic cuisine listing
+            urls.append(f"https://www.zomato.com{base}/restaurants/{slug}")
+            if context == "delivery":
+                urls.append(
+                    f"https://www.zomato.com{base}/restaurants/{slug}?order-online=1"
+                )
+        else:
+            if context == "delivery":
+                urls.append(f"https://www.zomato.com{base}/restaurants?order-online=1")
+            elif context == "dineout":
+                urls.append(f"https://www.zomato.com{base}/dine-out")
+            elif context == "nightlife":
+                urls.append(f"https://www.zomato.com{base}/nightlife")
+            else:
+                urls.append(f"https://www.zomato.com{base}/restaurants")
 
-        data = self._get(ep.GET_PAGE, params={
-            "url": url_path,
-            "lat": lat,
-            "lng": lng,
-        })
+        seen: dict[int | str, dict] = {}
+        for url in urls:
+            for res in self._fetch_ssr_search(url):
+                rid = res.get("resId") or res.get("res_id") or res.get("name", "")
+                if rid and rid not in seen:
+                    seen[rid] = res
 
-        sections = data.get("page_data", {}).get("sections", {})
-        results = sections.get("SECTION_SEARCH_RESULT", [])
-        return [self._parse_restaurant(r) for r in results if isinstance(r, dict)]
+        return list(seen.values())
+
+    def _fetch_ssr_search(self, page_url: str) -> list[dict]:
+        """Fetch a Zomato listing page and extract restaurants from
+        the server-rendered ``__PRELOADED_STATE__`` JSON blob.
+
+        This bypasses the IP-scoped ``getPage`` webroute by reading
+        results that are embedded directly in the HTML.
+        """
+        import json as _json
+        import re as _re
+
+        resp = self._session.get(
+            page_url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml",
+            },
+            cookies=self._cookies(),
+            timeout=30,
+            allow_redirects=True,
+        )
+        if resp.status_code != 200 or len(resp.text) < 50_000:
+            return []
+
+        match = _re.search(
+            r'window\.__PRELOADED_STATE__\s*=\s*JSON\.parse\("(.*?)"\)',
+            resp.text,
+            _re.DOTALL,
+        )
+        if not match:
+            return []
+
+        try:
+            raw = match.group(1)
+            unescaped = raw.encode().decode("unicode_escape")
+            data = _json.loads(unescaped)
+        except (ValueError, UnicodeDecodeError):
+            return []
+
+        results: list[dict] = []
+        search_pages = data.get("pages", {}).get("search", {})
+        for page_data in search_pages.values():
+            if not isinstance(page_data, dict):
+                continue
+            sections = page_data.get("sections", {})
+            for raw in sections.get("SECTION_SEARCH_RESULT", []):
+                if isinstance(raw, dict):
+                    results.append(self._parse_restaurant(raw))
+        return results
 
     def _parse_restaurant(self, raw: dict) -> dict:
         """Parse a raw restaurant entity from the search results."""

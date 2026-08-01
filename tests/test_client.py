@@ -97,46 +97,51 @@ class TestCSRF:
 # ── Search restaurants tests ────────────────────────────────────
 
 class TestSearchRestaurants:
+    @staticmethod
+    def _ssr_html(search_key: str, results: list) -> str:
+        """Build a mock SSR HTML page with __PRELOADED_STATE__."""
+        import json as _j
+        state = {"pages": {"search": {search_key: {"sections": {"SECTION_SEARCH_RESULT": results}}}}}
+        state_json = _j.dumps(state).replace('"', '\\"')
+        return (
+            '<html><script>'
+            f'window.__PRELOADED_STATE__ = JSON.parse("{state_json}");'
+            '</script>' + 'x' * 60000 + '</html>'
+        )
+
     @responses.activate
     def test_search_restaurants(self, client):
-        mock_data = {
-            "page_data": {
-                "sections": {
-                    "SECTION_SEARCH_RESULT": [
-                        {
-                            "type": "restaurant",
-                            "info": {
-                                "resId": 12345,
-                                "name": "Test Restaurant",
-                                "cuisine": [
-                                    {"name": "North Indian"},
-                                    {"name": "Chinese"},
-                                ],
-                                "rating": {"aggregate_rating": "4.2", "rating_subtitle": "Very Good", "votes": "100"},
-                                "cft": {"text": "₹500 for two"},
-                                "cfo": {"text": "₹250 for one"},
-                                "image": {"url": "https://b.zmtcdn.com/test.jpg"},
-                                "resUrl": "/gurugram/test-restaurant",
-                                "locality": {"name": "DLF Phase 1"},
-                                "timing": {"text": "Open now"},
-                                "ratingNew": {
-                                    "ratings": {
-                                        "DELIVERY": {"rating": "4.2", "reviewCount": "50"},
-                                        "DINING": {"rating": "4.5", "reviewCount": "30"},
-                                    }
-                                },
-                            },
-                            "isPromoted": False,
+        mock_html = self._ssr_html(
+            "/ncr/restaurants?order-online=1",
+            [{
+                "type": "restaurant",
+                "info": {
+                    "resId": 12345,
+                    "name": "Test Restaurant",
+                    "cuisine": [{"name": "North Indian"}, {"name": "Chinese"}],
+                    "rating": {"aggregate_rating": "4.2", "rating_subtitle": "Very Good", "votes": "100"},
+                    "cft": {"text": "\u20b9500 for two"},
+                    "cfo": {"text": "\u20b9250 for one"},
+                    "image": {"url": "https://b.zmtcdn.com/test.jpg"},
+                    "resUrl": "/gurugram/test-restaurant",
+                    "locality": {"name": "DLF Phase 1"},
+                    "timing": {"text": "Open now"},
+                    "ratingNew": {
+                        "ratings": {
+                            "DELIVERY": {"rating": "4.2", "reviewCount": "50"},
+                            "DINING": {"rating": "4.5", "reviewCount": "30"},
                         }
-                    ]
-                }
-            }
-        }
+                    },
+                },
+                "isPromoted": False,
+            }],
+        )
         responses.add(
             responses.GET,
-            f"{ep.ZOMATO_BASE}{ep.GET_PAGE}",
-            json=mock_data,
+            "https://www.zomato.com/ncr/restaurants",
+            body=mock_html,
             status=200,
+            content_type="text/html",
         )
         results = client.search_restaurants(city="gurugram")
         assert len(results) == 1
@@ -145,20 +150,22 @@ class TestSearchRestaurants:
         assert r["resId"] == 12345
         assert r["cuisine"] == "North Indian, Chinese"
         assert r["rating"] == "4.2"
-        assert r["cost_for_two"] == "₹500 for two"
+        assert r["cost_for_two"] == "\u20b9500 for two"
         assert r["locality"] == "DLF Phase 1"
         assert r["delivery_rating"] == "4.2"
         assert r["dining_rating"] == "4.5"
 
     @responses.activate
     def test_search_restaurants_empty(self, client):
+        mock_html = self._ssr_html("/ncr/restaurants", [])
         responses.add(
             responses.GET,
-            f"{ep.ZOMATO_BASE}{ep.GET_PAGE}",
-            json={"page_data": {"sections": {"SECTION_SEARCH_RESULT": []}}},
+            "https://www.zomato.com/ncr/restaurants",
+            body=mock_html,
             status=200,
+            content_type="text/html",
         )
-        results = client.search_restaurants(city="gurugram")
+        results = client.search_restaurants(city="gurugram", context="delivery")
         assert results == []
 
 
@@ -325,13 +332,13 @@ class TestErrorHandling:
     def test_api_failure(self, client):
         responses.add(
             responses.GET,
-            f"{ep.ZOMATO_BASE}{ep.GET_PAGE}",
+            f"{ep.ZOMATO_BASE}{ep.RESTAURANT_INFO}",
             json={"status": "failed", "message": "Missing/Invalid parameters"},
             status=400,
         )
         # _get only raises for 401, 404, 5xx — 400 with "status":"failed" should raise
         with pytest.raises(ZomatoAPIError):
-            client.search_restaurants(city="gurugram")
+            client.get_restaurant(res_id=1827)
 
 
 # ── District events tests ─────────────────────────────────────

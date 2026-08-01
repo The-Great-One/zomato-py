@@ -116,6 +116,7 @@ def cmd_restaurants(args: argparse.Namespace) -> None:
     results = client.search_restaurants(
         city=args.city,
         context=args.context,
+        cuisine=args.cuisine,
     )
     if args.limit:
         results = results[:args.limit]
@@ -223,8 +224,14 @@ def cmd_search(args: argparse.Namespace) -> None:
     client = ZomatoClient()
     if args.city:
         client.set_location(city=args.city)
-    results = client.auto_suggest(query=args.query)
-    print(json.dumps(results, indent=2, ensure_ascii=False))
+    # Use SSR search (bypasses IP-scoping) when a city is provided
+    results = client.search_restaurants(
+        city=args.city,
+        cuisine=args.query,
+    )
+    _print_restaurants(results)
+    if args.json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
 
 
 def cmd_location_search(args: argparse.Namespace) -> None:
@@ -520,12 +527,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
     # restaurants
-    p = sub.add_parser("restaurants", help="Search restaurants in a city")
+    p = sub.add_parser("restaurants", help="Search restaurants in a city (cuisine filter bypasses IP-scoping)")
     p.add_argument("--city", default="gurugram", help="City slug (e.g. gurugram, delhi)")
     p.add_argument("--context", default="delivery", choices=["delivery", "dineout", "nightlife"])
+    p.add_argument("--cuisine", default=None, help="Cuisine filter (e.g. burger, pizza, chinese)")
     p.add_argument("--lat", type=float, default=None)
     p.add_argument("--lng", type=float, default=None)
-    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--limit", type=int, default=30)
     p.add_argument("--json", action="store_true", help="Output as JSON")
     p.set_defaults(func=cmd_restaurants)
 
@@ -571,9 +579,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_movies)
 
     # search (auto-suggest)
-    p = sub.add_parser("search", help="Search suggestions for a query")
-    p.add_argument("query", help="Search query (e.g. 'pizza')")
+    p = sub.add_parser("search", help="Search restaurants by cuisine (bypasses IP-scoping)")
+    p.add_argument("query", help="Cuisine or search query (e.g. 'burger', 'pizza')")
     p.add_argument("--city", default="gurugram")
+    p.add_argument("--json", action="store_true", help="Output as JSON")
     p.set_defaults(func=cmd_search)
 
     # location
