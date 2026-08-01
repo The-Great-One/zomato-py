@@ -174,7 +174,8 @@ def cmd_restaurant_events(args: argparse.Namespace) -> None:
     if not restaurants:
         print("No restaurants with events found.")
         return
-    print(f"\n{len(restaurants)} restaurants with events on '{args.when}':\n")
+    when_label = args.when or "all upcoming"
+    print(f"\n{len(restaurants)} restaurants with events ({when_label}):\n")
     for i, r in enumerate(restaurants, 1):
         print(f"  {i}. {r['restaurant']}")
         if r.get("locality"):
@@ -280,7 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
     # restaurant-events
     p = sub.add_parser("restaurant-events", help="List restaurants having events on a given day")
     p.add_argument("--city", default="gurugram")
-    p.add_argument("--when", default="today", help="'today', 'tomorrow', 'weekend', or 'YYYY-MM-DD'")
+    p.add_argument("--when", default="", help="'today', 'tomorrow', 'weekend', 'YYYY-MM-DD', or empty for all upcoming")
     p.add_argument("--query", default="", help="Keyword filter (e.g. 'sufi', 'live', 'comedy')")
     p.add_argument("--category", default="", help="Filter by category: comedy, live music, party, food, theatre, watch party")
     p.add_argument("--include-activities", action="store_true", help="Include water parks, go-karting, arcades (excluded by default)")
