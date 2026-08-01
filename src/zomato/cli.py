@@ -355,6 +355,56 @@ def cmd_value(args: argparse.Namespace) -> None:
         print(json.dumps(value, indent=2, ensure_ascii=False))
 
 
+def cmd_party(args: argparse.Namespace) -> None:
+    """Find party places near you."""
+    client = ZomatoClient()
+    if args.lat and args.lng:
+        client.set_location(lat=args.lat, lng=args.lng)
+    if args.city:
+        client.set_location(city=args.city)
+    places = client.find_party_places(
+        lat=args.lat,
+        lng=args.lng,
+        radius_km=args.radius,
+        when=args.when,
+        include_offers=not args.no_offers,
+    )
+    if not places:
+        print("No party places found near you.")
+        return
+    print(f"\n{len(places)} party places near you ({args.when or 'all upcoming'}):\n")
+    for i, p in enumerate(places, 1):
+        name = p.get("name", "Unknown")
+        dist = p.get("distance_km", 0)
+        rating = p.get("rating", "")
+        source = p.get("source", "")
+        source_icon = "🎭" if source == "district" else "🍽️"
+        dist_str = f"{dist}km" if dist else "?"
+        rating_str = f"{rating}★" if rating else ""
+        print(f"  {i:2d}. {source_icon} {name} — {dist_str} {rating_str}")
+        if p.get("locality"):
+            print(f"      📍 {p['locality']}, {p.get('city', '')}")
+        if p.get("address"):
+            print(f"      📍 {p['address']}")
+        for ev in p.get("events", []):
+            line = f"      → {ev['title']}"
+            if ev.get("category"):
+                line += f" [{ev['category']}]"
+            if ev.get("date"):
+                line += f" — {ev['date']}"
+            if ev.get("price"):
+                line += f" — {ev['price']}"
+            print(line)
+        for off in p.get("offers", []):
+            if off.get("title"):
+                line = f"      💰 {off['title']}"
+                if off.get("subtitle"):
+                    line += f" ({off['subtitle']})"
+                print(line)
+    if args.json:
+        print(json.dumps(places, indent=2, ensure_ascii=False))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="zomato",
@@ -461,6 +511,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--id", type=int, required=True, help="Restaurant ID")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_value)
+
+    # party (NEW)
+    p = sub.add_parser("party", help="Find party places near you")
+    p.add_argument("--city", default="gurugram", help="City name")
+    p.add_argument("--lat", type=float, default=None, help="Your latitude")
+    p.add_argument("--lng", type=float, default=None, help="Your longitude")
+    p.add_argument("--radius", type=float, default=15, help="Max distance in km (default: 15)")
+    p.add_argument("--when", default="weekend", help="'today', 'tomorrow', 'weekend', 'YYYY-MM-DD', or empty for all")
+    p.add_argument("--no-offers", action="store_true", help="Skip fetching dining offers")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_party)
 
     return parser
 

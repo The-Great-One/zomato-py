@@ -1556,6 +1556,253 @@ class ZomatoClient:
             "date": date,
         })
 
+    # ── Restaurant search by name ─────────────────────────────────
+
+    def find_restaurant_by_url(self, url_slug: str) -> dict | None:
+        """Find a restaurant by its Zomato URL slug.
+
+        Args:
+            url_slug: e.g. 'ncr/avatar-sector-58-gurgaon' or full URL
+
+        Returns:
+            Restaurant dict (from get_restaurant) or None if not found.
+        """
+        slug = url_slug.lstrip("/")
+        if slug.startswith("https://"):
+            # Full URL — extract the path
+            from urllib.parse import urlparse
+            parsed = urlparse(url_slug)
+            slug = parsed.path.lstrip("/")
+
+        # Fetch the HTML page to extract resId
+        resp = self._session.get(
+            f"{ep.ZOMATO_BASE}/{slug}",
+            headers={"Accept": "text/html, */*"},
+            cookies=self._cookies(),
+        )
+        if resp.status_code != 200:
+            return None
+        html = resp.text
+        # Extract resId from the page
+        match = re.search(r'"resId"\s*:\s*(\d{5,})', html)
+        if not match:
+            match = re.search(r'resId["\s:=]+(\d{5,})', html)
+        if not match:
+            return None
+        res_id = int(match.group(1))
+        return self.get_restaurant(res_id)
+
+    def search_restaurant_by_name(self, name: str, city: str = "gurugram") -> list[dict]:
+        """Search for restaurants by name on Zomato.
+
+        Uses the getPage endpoint to search for restaurants matching the name.
+        Returns list of restaurant dicts with resId, name, rating, etc.
+
+        Args:
+            name: Restaurant name (e.g. 'Avatar')
+            city: City slug for search context
+
+        Returns:
+            List of matching restaurants with basic info.
+        """
+        # Try the getPage endpoint with the search query
+        data = self._get(ep.GET_PAGE, params={
+            "url": f"/{city}/restaurants?q={urllib.parse.quote(name)}",
+            "lat": self.location.lat,
+            "lng": self.location.lng,
+        })
+        sections = data.get("page_data", {}).get("sections", {})
+        results = sections.get("SECTION_SEARCH_RESULT", [])
+        restaurants = []
+        for r in results:
+            if isinstance(r, dict):
+                parsed = self._parse_restaurant(r)
+                if name.lower() in parsed.get("name", "").lower():
+                    restaurants.append(parsed)
+        return restaurants
+
+    def get_dining_offers(self, res_id: int) -> list[dict]:
+        """Get dining offers for a restaurant from its Zomato page.
+
+        This is different from get_restaurant_offers() which uses the order/resOffer
+        endpoint. This method extracts dining offers (time-limited discounts)
+        from the restaurant/info endpoint's SECTION_DINING_OFFERS.
+
+        Args:
+            res_id: Zomato restaurant ID
+
+        Returns:
+            List of offer dicts with title, subtitle, start_time, end_time,
+            offer_value, offer_type.
+        """
+        data = self._get(ep.RESTAURANT_INFO, params={"res_id": res_id})
+        sections = data.get("page_data", {}).get("sections", {})
+
+        offers: list[dict] = []
+        # SECTION_DINING_OFFERS is a list
+        raw_offers = sections.get("SECTION_DINING_OFFERS", [])
+        if isinstance(raw_offers, list):
+            for o in raw_offers:
+                if not isinstance(o, dict):
+                    continue
+                offers.append({
+                    "title": o.get("title", "").replace("\n", " "),
+                    "subtitle": o.get("subtitle", "").replace("\n", " "),
+                    "start_time": o.get("start_time", ""),
+                    "end_time": o.get("end_time", ""),
+                    "offer_value": o.get("offer_value", 0),
+                    "offer_type": o.get("offerType", ""),
+                })
+
+        # Also check V2 offers
+        v2 = sections.get("SECTION_DINING_OFFERS_V2", {})
+        if isinstance(v2, dict):
+            v2_offers = v2.get("offers", [])
+            if isinstance(v2_offers, list):
+                for o in v2_offers:
+                    if not isinstance(o, dict):
+                        continue
+                    heading = o.get("heading", "")
+                    offers.append({
+                        "title": o.get("title", "").replace("\n", " "),
+                        "subtitle": o.get("subtitle", "").replace("\n", " "),
+                        "start_time": o.get("start_time", ""),
+                        "end_time": o.get("end_time", ""),
+                        "offer_value": o.get("offer_value", 0),
+                        "offer_type": o.get("offerType", ""),
+                        "heading": heading,
+                    })
+
+        return offers
+
+    def find_party_places(
+        self,
+        lat: float | None = None,
+        lng: float | None = None,
+        radius_km: float = 15,
+        when: str = "weekend",
+        include_offers: bool = True,
+    ) -> list[dict]:
+        """Find party places near a location.
+
+        Combines District events with Zomato restaurant data and dining offers.
+        Sorts by distance from the user's location.
+
+        Args:
+            lat/lng: User location (defaults to client location)
+            radius_km: Max distance in km (default 15)
+            when: Date filter for events
+            include_offers: Include dining offers from Zomato
+
+        Returns:
+            List of dicts with: name, rating, address, distance_km,
+            events (list), offers (list), source ('district' or 'zomato')
+        """
+        import math
+
+        if lat is None:
+            lat = self.location.lat
+        if lng is None:
+            lng = self.location.lng
+
+        results: list[dict] = []
+
+        # 1. Get District events (nightlife only)
+        events = self.get_events(city="", when=when)
+        nightlife = [e for e in events if not e.get("is_activity", False)]
+
+        # Group by venue and add distance
+        by_venue: dict[str, dict] = {}
+        for e in nightlife:
+            venue = e.get("venue", "") or "Unknown"
+            e_lat = e.get("lat", 0) or 0
+            e_lng = e.get("long", 0) or 0
+            dist = 0
+            if e_lat and e_lng:
+                dist = self._haversine(lat, lng, e_lat, e_lng)
+            if dist > radius_km:
+                continue
+            if venue not in by_venue:
+                by_venue[venue] = {
+                    "name": venue,
+                    "address": e.get("address", ""),
+                    "city": e.get("city", ""),
+                    "locality": e.get("locality", ""),
+                    "lat": e_lat,
+                    "lng": e_lng,
+                    "distance_km": round(dist, 1),
+                    "events": [],
+                    "offers": [],
+                    "source": "district",
+                }
+            by_venue[venue]["events"].append({
+                "title": e.get("title", ""),
+                "date": e.get("date", ""),
+                "price": e.get("price", ""),
+                "category": e.get("category", ""),
+                "url": e.get("url", ""),
+            })
+
+        results.extend(by_venue.values())
+
+        # 2. Search Zomato nightlife restaurants in the area
+        # This catches bars/clubs not listed on District.in
+        try:
+            restaurants = self.search_restaurants(
+                city=self.location.city_name.lower() if hasattr(self.location, 'city_name') else "gurugram",
+                context="nightlife",
+            )
+            for r in restaurants:
+                name = r.get("name", "")
+                if not name:
+                    continue
+                # Check if already found via District
+                if any(name.lower() in v.get("name", "").lower() for v in results):
+                    continue
+                results.append({
+                    "name": name,
+                    "address": "",
+                    "city": self.location.city_name,
+                    "locality": r.get("locality", ""),
+                    "lat": 0,
+                    "lng": 0,
+                    "distance_km": 0,
+                    "rating": r.get("rating", ""),
+                    "events": [],
+                    "offers": [],
+                    "source": "zomato",
+                    "res_id": r.get("resId"),
+                })
+        except Exception:
+            pass
+
+        # 3. Get dining offers for Zomato restaurants
+        if include_offers:
+            for r in results:
+                res_id = r.get("res_id")
+                if res_id and not r.get("offers"):
+                    try:
+                        r["offers"] = self.get_dining_offers(res_id)
+                    except Exception:
+                        pass
+
+        # Sort by distance (0 = unknown, goes last)
+        results.sort(key=lambda x: (x["distance_km"] == 0, x["distance_km"]))
+
+        return results
+
+    @staticmethod
+    def _haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+        """Calculate distance between two lat/lng points in km."""
+        import math
+        R = 6371
+        dlat = math.radians(lat2 - lat1)
+        dlng = math.radians(lng2 - lng1)
+        a = (math.sin(dlat / 2) ** 2 +
+             math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+             math.sin(dlng / 2) ** 2)
+        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
     # ── Utility ──────────────────────────────────────────────────
 
     def set_location(self, city: str | None = None, lat: float | None = None, lng: float | None = None):
