@@ -875,10 +875,68 @@ class ZomatoClient:
                 "address": "",
             })
 
+        # Classify events
+        for e in events:
+            e["category"] = self._classify_event(e)
+
         # Sort by start_epoch (earliest first, 0 = unknown goes last)
         events.sort(key=lambda e: (e["start_epoch"] == 0, e["start_epoch"]))
 
         return events
+
+    # ── Event classification ───────────────────────────────────────
+
+    _CATEGORY_KEYWORDS: dict[str, list[str]] = {
+        "Comedy": [
+            "comedy", "standup", "stand up", "stand-up", "comics",
+            "laugh", "joke", "punchline", "hideout", "foyer",
+        ],
+        "Live Music": [
+            "live", "music", "band", "concert", "tour", "acoustic",
+            "guitar", "vocal", "qawwal", "classical", "rap", "hip-hop",
+            "hip hop", "singer", "artist", "krishna das", "zafrir",
+            "afro", "supper club",
+        ],
+        "Party / Nightlife": [
+            "party", "club", "dj", "night", "social", "block party",
+            "ctrl", "apes", "room xo", "d-dion", "martini",
+        ],
+        "Food & Drink": [
+            "brunch", "supper club", "culinary", "festival", "tasting",
+            "aperitivo", "shaam", "anatolia", "turkish", "food",
+            "indian shaam", "marièta", "cosy",
+        ],
+        "Theatre / Performance": [
+            "theatrical", "theatre", "theater", "performance",
+            "auditorium", "krishn",
+        ],
+        "Watch Party": [
+            "watch party", "screening", "got latent",
+        ],
+    }
+
+    def _classify_event(self, event: dict) -> str:
+        """Classify an event into a category based on its text fields."""
+        if event.get("is_activity", False):
+            return "Activity / Adventure"
+
+        text = " ".join([
+            event.get("title", ""),
+            event.get("venue", ""),
+            event.get("tag_line", ""),
+            event.get("description", ""),
+        ]).lower()
+
+        scores: dict[str, int] = {}
+        for cat, keywords in self._CATEGORY_KEYWORDS.items():
+            score = sum(1 for kw in keywords if kw in text)
+            if score > 0:
+                scores[cat] = score
+
+        if scores:
+            return max(scores, key=scores.get)
+
+        return "Other"
 
     def _filter_events_by_when(self, events: list[dict], when: str) -> list[dict]:
         """Filter events by date keyword or ISO date.
@@ -947,6 +1005,7 @@ class ZomatoClient:
         when: str = "today",
         query: str = "",
         nightlife_only: bool = False,
+        category: str = "",
     ) -> list[dict]:
         """Get restaurants that have events on a given day.
 
@@ -958,12 +1017,16 @@ class ZomatoClient:
             when: 'today', 'tomorrow', 'weekend', or 'YYYY-MM-DD'
             query: Optional keyword filter (e.g. 'sufi', 'live', 'comedy')
             nightlife_only: Exclude activities (water parks, go-karting, arcades)
+            category: Filter by classified category (comedy, live music, party, etc.)
 
         Returns list of dicts with keys: restaurant, locality, city, events (list).
         """
         events = self.get_events(city=city, when=when)
         if nightlife_only:
             events = [e for e in events if not e.get("is_activity", False)]
+        if category:
+            cat_lower = category.lower()
+            events = [e for e in events if cat_lower in e.get("category", "").lower()]
         if query:
             q = query.lower()
             events = [
@@ -991,6 +1054,7 @@ class ZomatoClient:
                 "date": e.get("date", ""),
                 "price": e.get("price", ""),
                 "tag_line": e.get("tag_line", ""),
+                "category": e.get("category", ""),
                 "url": e.get("url", ""),
             })
 

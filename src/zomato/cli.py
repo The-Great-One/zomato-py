@@ -64,7 +64,10 @@ def _print_events(events: list[dict]) -> None:
         tag_line = e.get("tag_line", "")
         price = e.get("price", "")
         rating = e.get("rating", "")
+        category = e.get("category", "")
         print(f"  {i:2d}. {title}")
+        if category:
+            print(f"      🎭 {category}")
         if date:
             print(f"      📅 {date}")
         if venue:
@@ -159,7 +162,15 @@ def cmd_restaurant_events(args: argparse.Namespace) -> None:
         when=args.when,
         query=args.query,
         nightlife_only=not args.include_activities,
+        category=args.category,
     )
+    # Filter by category
+    if args.category:
+        cat = args.category.lower()
+        restaurants = [
+            r for r in restaurants
+            if any(cat in ev.get("category", "").lower() for ev in r.get("events", []))
+        ]
     if not restaurants:
         print("No restaurants with events found.")
         return
@@ -172,6 +183,8 @@ def cmd_restaurant_events(args: argparse.Namespace) -> None:
             print(f"     📍 {r['address']}")
         for ev in r.get("events", []):
             line = f"     → {ev['title']}"
+            if ev.get("category"):
+                line += f" [{ev['category']}]"
             if ev.get("date"):
                 line += f" — {ev['date']}"
             if ev.get("price"):
@@ -269,6 +282,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--city", default="gurugram")
     p.add_argument("--when", default="today", help="'today', 'tomorrow', 'weekend', or 'YYYY-MM-DD'")
     p.add_argument("--query", default="", help="Keyword filter (e.g. 'sufi', 'live', 'comedy')")
+    p.add_argument("--category", default="", help="Filter by category: comedy, live music, party, food, theatre, watch party")
     p.add_argument("--include-activities", action="store_true", help="Include water parks, go-karting, arcades (excluded by default)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_restaurant_events)
