@@ -368,6 +368,7 @@ def cmd_party(args: argparse.Namespace) -> None:
         radius_km=args.radius,
         when=args.when,
         include_offers=not args.no_offers,
+        crawl_details=not args.no_crawl,
     )
     if not places:
         print("No party places found near you.")
@@ -520,6 +521,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--radius", type=float, default=15, help="Max distance in km (default: 15)")
     p.add_argument("--when", default="weekend", help="'today', 'tomorrow', 'weekend', 'YYYY-MM-DD', or empty for all")
     p.add_argument("--no-offers", action="store_true", help="Skip fetching dining offers")
+    p.add_argument("--no-crawl", action="store_true", help="Skip crawling individual event and venue pages")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_party)
 

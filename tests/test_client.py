@@ -7,10 +7,9 @@ Run with: python -m pytest tests/ -q
 import json
 import pytest
 import responses
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from zomato import ZomatoClient, Location
-from zomato.client import USER_AGENT
 from zomato import endpoints as ep
 from zomato.exceptions import ZomatoAPIError, ZomatoAuthError, ZomatoNotFoundError
 
@@ -370,6 +369,274 @@ class TestDistrictEvents:
         )
         events = client.get_events(city="")
         assert events == []
+
+
+# ── District individual-page crawling tests ────────────────────
+
+
+def _district_rsc_html(payload: dict) -> str:
+    """Wrap a payload in the Next.js RSC script format District serves."""
+    return (
+        "<html><body><script>self.__next_f.push([1,"
+        f"{json.dumps(json.dumps(payload, separators=(',', ':')))}"
+        "])</script></body></html>"
+    )
+
+
+def _event_json_ld(name: str, description: str) -> str:
+    schema = {
+        "@context": "https://schema.org",
+        "@type": "Event",
+        "name": name,
+        "description": description,
+        "startDate": "2026-08-01T20:00:00+05:30",
+        "endDate": "2026-08-02T01:00:00+05:30",
+        "organizer": {"@type": "Organization", "name": "District Nights"},
+        "location": {"@type": "Place", "name": "Rail Venue"},
+        "offers": {"@type": "Offer", "price": "999", "priceCurrency": "INR"},
+    }
+    return (
+        '<html><body><script type="application/ld+json">'
+        f"{json.dumps(schema)}"
+        "</script></body></html>"
+    )
+
+
+class TestDistrictIndividualPages:
+    @responses.activate
+    def test_get_district_venue_by_slug_sends_guest_headers_and_returns_rails(self, client):
+        venue_api = f"{ep.DISTRICT_BASE}/gw/consumer/event/venue-page-web"
+        payload = {
+            "name": "Rail Venue",
+            "venue_page_rails": [
+                {"title": "Upcoming", "items": [{"label": "Hidden Party", "slug": "hidden-party"}]}
+            ],
+        }
+        responses.add(responses.GET, venue_api, json=payload, status=200)
+
+        venue = client.get_district_venue_by_slug("rail-venue")
+
+        assert venue["venue_page_rails"][0]["items"][0]["slug"] == "hidden-party"
+        request = responses.calls[0].request
+        assert request.params == {"venue_slug": "rail-venue"}
+        assert request.headers["x-guest-token"] == "1212"
+        assert request.headers["x-app-type"] == "WEB"
+        assert request.headers["x-client-id"] == "district-web"
+        assert request.headers["x-app-version"] == "11.11.1"
+        assert request.headers["Referer"] == (
+            f"{ep.DISTRICT_BASE}/events/rail-venue/venue-guide"
+        )
+
+    @responses.activate
+    def test_crawl_uses_canonical_routes_parses_json_ld_and_recurses_into_venue_rails(self, client):
+        main_payload = {
+            "ItemDetails": {
+                "VenueData": {"name": "Rail Venue", "slug": "rail-venue"}
+            },
+            "second": {
+                "ItemDetails": {
+                    "EventData": {"name": "Listed Party", "event_slug": "listed-party"}
+                }
+            },
+        }
+        responses.add(
+            responses.GET,
+            f"{ep.DISTRICT_BASE}{ep.DISTRICT_EVENTS_PAGE}",
+            body=_district_rsc_html(main_payload),
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{ep.DISTRICT_BASE}/events/rail-venue/venue-guide",
+            body="<html><body>client rendered venue</body></html>",
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{ep.DISTRICT_BASE}/gw/consumer/event/venue-page-web",
+            json={
+                "name": "Rail Venue",
+                "venue_page_rails": [
+                    {
+                        "title": "More events",
+                        "items": [{"label": "Hidden Party", "slug": "hidden-party"}],
+                    }
+                ],
+            },
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{ep.DISTRICT_BASE}/events/listed-party-buy-tickets",
+            body=_event_json_ld("Listed Party", "Listed detail from JSON-LD"),
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{ep.DISTRICT_BASE}/events/hidden-party-buy-tickets",
+            body=_event_json_ld("Hidden Party", "Rail-only detail from JSON-LD"),
+            status=200,
+        )
+
+        crawl = client.crawl_individual_pages(
+            include_zomato_details=False,
+            max_pages=10,
+        )
+
+        assert crawl["stats"] == {
+            "venue_slugs_found": 1,
+            "event_slugs_found": 2,
+            "main_page_event_slugs_found": 1,
+            "venue_page_event_slugs_found": 1,
+            "venue_pages_crawled": 1,
+            "event_pages_crawled": 2,
+            "pages_with_embedded_data": 3,
+            "client_side_only_pages": 0,
+        }
+        pages = {page["slug"]: page for page in crawl["events"]}
+        assert set(pages) == {"listed-party", "hidden-party"}
+        assert pages["listed-party"]["url"].endswith("/events/listed-party-buy-tickets")
+        assert pages["hidden-party"]["url"].endswith("/events/hidden-party-buy-tickets")
+        assert pages["hidden-party"]["schema_event"]["description"] == (
+            "Rail-only detail from JSON-LD"
+        )
+        requested_urls = {call.request.url.split("?")[0] for call in responses.calls}
+        assert f"{ep.DISTRICT_BASE}/events/rail-venue/venue-guide" in requested_urls
+        assert f"{ep.DISTRICT_BASE}/events/listed-party-buy-tickets" in requested_urls
+        assert f"{ep.DISTRICT_BASE}/events/hidden-party-buy-tickets" in requested_urls
+
+    def test_find_party_places_merges_weekend_rail_event_with_distance_and_json_ld_detail(self, client):
+        venue_data = {
+            "name": "Rail Venue",
+            "address": "Sector 29, Gurugram",
+            "latitude": 28.4695,
+            "longitude": 77.0266,
+            "venue_page_rails": [
+                {
+                    "title": "Upcoming",
+                    "items": [
+                        {
+                            "label": "Hidden Saturday Party",
+                            "slug": "hidden-saturday-party",
+                            "date_time": "Sat, 8 PM",
+                            "price": "₹999 onwards",
+                        },
+                        {
+                            "label": "Hidden Wednesday Party",
+                            "slug": "hidden-wednesday-party",
+                            "date_time": "Wed, 8 PM",
+                        },
+                    ],
+                }
+            ],
+        }
+        hidden_schema = {
+            "@type": "Event",
+            "name": "Hidden Saturday Party",
+            "description": "Detail parsed from the event JSON-LD",
+            "startDate": "2026-08-01T20:00:00+05:30",
+            "endDate": "2026-08-02T01:00:00+05:30",
+            "organizer": {"name": "District Nights"},
+            "location": {"name": "Rail Venue", "address": "Sector 29"},
+            "offers": {"price": "999", "priceCurrency": "INR"},
+        }
+        crawl = {
+            "venues": [{"name": "Rail Venue", "venue_data": venue_data}],
+            "events": [
+                {
+                    "name": "Hidden Saturday Party",
+                    "schema_event": hidden_schema,
+                    "json_ld": [hidden_schema],
+                }
+            ],
+            "stats": {},
+        }
+
+        with (
+            patch.object(client, "get_events", return_value=[]),
+            patch.object(client, "crawl_individual_pages", return_value=crawl) as crawl_mock,
+            patch.object(client, "search_restaurants", return_value=[]),
+        ):
+            places = client.find_party_places(
+                lat=28.4595,
+                lng=77.0266,
+                radius_km=5,
+                when="weekend",
+                include_offers=False,
+            )
+
+        crawl_mock.assert_called_once_with(
+            include_events=True,
+            include_venues=True,
+            include_zomato_details=False,
+            max_pages=50,
+            city="gurugram",
+        )
+        assert len(places) == 1
+        place = places[0]
+        assert place["name"] == "Rail Venue"
+        assert place["address"] == "Sector 29, Gurugram"
+        assert place["distance_km"] == pytest.approx(1.1, abs=0.1)
+        assert [event["title"] for event in place["events"]] == ["Hidden Saturday Party"]
+        event = place["events"][0]
+        assert event["detail_crawled"] is True
+        assert event["description"] == "Detail parsed from the event JSON-LD"
+        assert event["organizer"] == "District Nights"
+        assert event["start_date"] == "2026-08-01T20:00:00+05:30"
+        assert event["ticket_offer"] == {"price": "999", "priceCurrency": "INR"}
+        assert event["url"] == (
+            f"{ep.DISTRICT_BASE}/events/hidden-saturday-party-buy-tickets"
+        )
+
+    def test_find_party_places_computes_distance_from_string_coordinates(self, client):
+        event = {
+            "title": "String Coordinate Party",
+            "venue": "String Coordinate Venue",
+            "city": "Gurugram",
+            "date": "Every Sat",
+            "start_epoch": 0,
+            "end_epoch": 0,
+            "is_activity": False,
+            "lat": "28.4695",
+            "long": "77.0266",
+        }
+
+        with (
+            patch.object(client, "get_events", return_value=[event]),
+            patch.object(client, "search_restaurants", return_value=[]),
+        ):
+            places = client.find_party_places(
+                lat=28.4595,
+                lng=77.0266,
+                radius_km=5,
+                include_offers=False,
+                crawl_details=False,
+            )
+
+        assert len(places) == 1
+        assert places[0]["lat"] == 28.4695
+        assert places[0]["lng"] == 77.0266
+        assert places[0]["distance_km"] == pytest.approx(1.1, abs=0.1)
+
+    def test_filter_venue_rail_human_date_by_exact_iso_date(self, client):
+        events = [
+            {"title": "Matching Party", "date": "10 Jan 2026 • 9:00 PM"},
+            {"title": "Other Party", "date": "11 Jan 2026 • 9:00 PM"},
+        ]
+
+        filtered = client._filter_events_by_when(events, "2026-01-10")
+
+        assert [event["title"] for event in filtered] == ["Matching Party"]
+
+    def test_filter_recurring_venue_rail_event_by_requested_weekday(self, client):
+        events = [
+            {"title": "Saturday Party", "date": "Every Sat"},
+            {"title": "Sunday Party", "date": "Every Sunday"},
+        ]
+
+        filtered = client._filter_events_by_when(events, "2026-01-10")
+
+        assert [event["title"] for event in filtered] == ["Saturday Party"]
 
 
 # ── City IDs tests ─────────────────────────────────────────────

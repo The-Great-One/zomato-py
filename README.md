@@ -99,6 +99,31 @@ zomato restaurant-events --include-activities
 zomato movies --city gurugram
 ```
 
+### Party and nightlife discovery
+
+`zomato party` combines District's main feed with a recursive crawl of every
+linked venue guide. Venue pages are loaded through District's client-side API,
+and event links found only inside venue rails are then crawled individually.
+This finds listings that the curated `/events` page omits and enriches results
+with descriptions, organizers, ticket offers, exact coordinates, venue hours,
+facilities, policies, and menus.
+
+```bash
+# Weekend nightlife near explicit coordinates
+zomato party --when weekend --lat 28.4595 --lng 77.0266
+
+# Increase the distance radius and limit results
+zomato party --when weekend --lat 28.4595 --lng 77.0266 --radius 25 -n 10
+
+# Skip the recursive page crawl when a faster, main-feed-only result is enough
+zomato party --when weekend --no-crawl
+```
+
+Activities such as water parks and go-karting remain excluded. Individual-page
+crawling is enabled by default. District access/refresh tokens may optionally
+be supplied via `DISTRICT_ACCESS_TOKEN` and `DISTRICT_REFRESH_TOKEN`; otherwise
+the unauthenticated guest web flow is used.
+
 ### Rating trends
 
 Track how a restaurant's rating changes over time. Fetches historical

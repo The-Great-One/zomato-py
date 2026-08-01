@@ -129,6 +129,11 @@ PROMO_INFO = "/webroutes/promo/info"
 DISTRICT_EVENTS_PAGE = "/events"
 DISTRICT_MOVIES_PAGE = "/movies"
 DISTRICT_HOME = "/"
+DISTRICT_VENUE_PAGE = "/gw/consumer/event/venue-page-web"
+DISTRICT_WEB_CLIENT_ID = "district-web"
+DISTRICT_WEB_APP_TYPE = "WEB"
+DISTRICT_WEB_APP_VERSION = "11.11.1"
+DISTRICT_GUEST_TOKEN = "1212"
 
 # Events gateway (from RSC data)
 EVENTS_REMINDER_SET = "/gw/consumer/dining/reminder/set"

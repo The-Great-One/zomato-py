@@ -7,7 +7,7 @@ Run with: python -m pytest tests/test_smoke.py -q --live
 import os
 import pytest
 
-from zomato import ZomatoClient, Location
+from zomato import ZomatoClient
 
 
 pytestmark = pytest.mark.skipif(

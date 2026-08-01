@@ -13,14 +13,12 @@ import re
 import time
 import urllib.parse
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import requests
-from bs4 import BeautifulSoup
-
 from . import endpoints as ep
 from .exceptions import (
     ZomatoAPIError,
@@ -1024,10 +1022,7 @@ class ZomatoClient:
         Returns list of event dicts with keys: title, venue, city, date,
         description, start_epoch, end_epoch.
         """
-        url = f"{ep.DISTRICT_BASE}{ep.DISTRICT_EVENTS_PAGE}"
-        resp = self._session.get(url, headers={"User-Agent": USER_AGENT})
-        resp.raise_for_status()
-        html = resp.text
+        html = self._get_district_events_html()
 
         events = self._parse_district_events(html)
 
@@ -1350,7 +1345,7 @@ class ZomatoClient:
                 "image_url": image_url,
                 "image_gallery": image_gallery,
                 "video_url": video_url,
-                "url": f"{ep.DISTRICT_BASE}/events/{slug}" if slug else "",
+                "url": f"{ep.DISTRICT_BASE}/events/{slug}-buy-tickets" if slug else "",
                 "start_epoch": epoch,
                 "end_epoch": end_epoch,
                 "is_activity": is_activity,
@@ -1468,16 +1463,48 @@ class ZomatoClient:
 
         filtered = []
         for e in events:
-            start = e.get("start_epoch", 0)
-            end = e.get("end_epoch", 0)
+            start = self._to_float(e.get("start_epoch"))
+            end = self._to_float(e.get("end_epoch"))
             if start == 0:
-                # No epoch — check date_string for keywords
-                date_str = e.get("date", "").lower()
+                date_str = str(e.get("date", "")).lower().strip()
+
+                # Venue rails commonly use human strings such as
+                # "10 Jan 2026 • 9:00 PM" rather than epochs.
+                date_part = re.split(r"\s*[•·|]\s*", date_str, maxsplit=1)[0].strip()
+                parsed_date = None
+                for fmt in ("%d %b %Y", "%d %B %Y", "%b %d, %Y", "%B %d, %Y"):
+                    try:
+                        parsed_date = datetime.strptime(date_part.title(), fmt).replace(tzinfo=ist)
+                        break
+                    except ValueError:
+                        continue
+                if parsed_date is not None:
+                    event_end = parsed_date + timedelta(days=1)
+                    if parsed_date < target_end and event_end > target_start:
+                        filtered.append(e)
+                    continue
+
+                # Recurring venue events ("Every Sat" / "Every Sunday")
+                # apply when the requested target range contains that weekday.
+                recurring_weekdays = set()
+                if "sat" in date_str:
+                    recurring_weekdays.add(5)
+                if "sun" in date_str:
+                    recurring_weekdays.add(6)
+                if recurring_weekdays:
+                    cursor = target_start
+                    while cursor < target_end:
+                        if cursor.weekday() in recurring_weekdays:
+                            filtered.append(e)
+                            break
+                        cursor += timedelta(days=1)
+                    continue
+
                 if when_lower == "today" and "today" in date_str:
                     filtered.append(e)
                 elif when_lower == "tomorrow" and "tomorrow" in date_str:
                     filtered.append(e)
-                elif when_lower == "weekend" and ("sat" in date_str or "sun" in date_str or "weekend" in date_str):
+                elif when_lower == "weekend" and "weekend" in date_str:
                     filtered.append(e)
                 continue
             if end == 0:
@@ -1682,6 +1709,7 @@ class ZomatoClient:
         radius_km: float = 15,
         when: str = "weekend",
         include_offers: bool = True,
+        crawl_details: bool = True,
     ) -> list[dict]:
         """Find party places near a location.
 
@@ -1693,13 +1721,13 @@ class ZomatoClient:
             radius_km: Max distance in km (default 15)
             when: Date filter for events
             include_offers: Include dining offers from Zomato
+            crawl_details: Crawl individual District venue/event pages and
+                enrich results with descriptions, organizers, and ticket offers
 
         Returns:
             List of dicts with: name, rating, address, distance_km,
             events (list), offers (list), source ('district' or 'zomato')
         """
-        import math
-
         if lat is None:
             lat = self.location.lat
         if lng is None:
@@ -1711,12 +1739,97 @@ class ZomatoClient:
         events = self.get_events(city="", when=when)
         nightlife = [e for e in events if not e.get("is_activity", False)]
 
+        # Crawl individual venue/event pages and use their schema.org data to
+        # enrich the cards returned by the main listing page.
+        detail_by_name: dict[str, dict] = {}
+        detail_by_url: dict[str, dict] = {}
+        detail_by_identity: dict[tuple[str, str], dict] = {}
+        venue_detail_by_name: dict[str, dict] = {}
+        if crawl_details:
+            try:
+                crawl = self.crawl_individual_pages(
+                    include_events=True,
+                    include_venues=True,
+                    include_zomato_details=False,
+                    max_pages=50,
+                    city=self.location.city_name.lower(),
+                )
+                for page in crawl.get("events", []):
+                    schema = page.get("schema_event")
+                    if isinstance(schema, dict):
+                        normalized_name = page.get("name", "").strip().lower()
+                        detail_by_name[normalized_name] = schema
+                        page_url = page.get("url", "").rstrip("/")
+                        if page_url:
+                            detail_by_url[page_url] = schema
+                        location = schema.get("location", {})
+                        location_name = location.get("name", "") if isinstance(location, dict) else ""
+                        if normalized_name and location_name:
+                            detail_by_identity[(normalized_name, location_name.strip().lower())] = schema
+
+                # Venue pages expose additional event rails that are missing
+                # from the main discovery listing. Convert them into the same
+                # event structure and merge them before date filtering.
+                venue_events: list[dict] = []
+                for page in crawl.get("venues", []):
+                    venue_data = page.get("venue_data")
+                    if not isinstance(venue_data, dict) or not venue_data:
+                        continue
+                    venue_name = venue_data.get("name", page.get("name", ""))
+                    venue_detail_by_name[venue_name.strip().lower()] = venue_data
+                    rails = venue_data.get("venue_page_rails") or venue_data.get("venue_events_by_categories") or []
+                    for rail in rails if isinstance(rails, list) else []:
+                        for item in rail.get("items", []) if isinstance(rail, dict) else []:
+                            if not isinstance(item, dict):
+                                continue
+                            title = item.get("label", "")
+                            if not title:
+                                continue
+                            event = {
+                                "title": title,
+                                "venue": venue_name,
+                                "city": self.location.city_name,
+                                "locality": "",
+                                "date": item.get("date_time", ""),
+                                "description": venue_data.get("description", ""),
+                                "tag_line": venue_data.get("tagline", ""),
+                                "price": item.get("price", ""),
+                                "category": item.get("category", ""),
+                                "url": f"{ep.DISTRICT_BASE}/events/{item.get('slug')}-buy-tickets" if item.get("slug") else "",
+                                "start_epoch": 0,
+                                "end_epoch": 0,
+                                "is_activity": False,
+                                "address": venue_data.get("address", ""),
+                                "lat": venue_data.get("latitude", 0),
+                                "long": venue_data.get("longitude", 0),
+                            }
+                            if not event["category"]:
+                                event["category"] = self._classify_event(event)
+                            venue_events.append(event)
+
+                if when:
+                    venue_events = self._filter_events_by_when(venue_events, when)
+                seen = {
+                    (e.get("title", "").strip().lower(), e.get("venue", "").strip().lower())
+                    for e in nightlife
+                }
+                for event in venue_events:
+                    key = (event.get("title", "").strip().lower(), event.get("venue", "").strip().lower())
+                    if key not in seen:
+                        nightlife.append(event)
+                        seen.add(key)
+            except Exception:
+                # Keep any enrichment collected before a malformed or failed
+                # page; main-feed discovery remains usable.
+                pass
+
         # Group by venue and add distance
         by_venue: dict[str, dict] = {}
         for e in nightlife:
             venue = e.get("venue", "") or "Unknown"
-            e_lat = e.get("lat", 0) or 0
-            e_lng = e.get("long", 0) or 0
+            venue_detail = venue_detail_by_name.get(venue.strip().lower(), {})
+            e_lat = self._to_float(e.get("lat") or venue_detail.get("latitude"))
+            e_lng = self._to_float(e.get("long") or venue_detail.get("longitude"))
             dist = 0
             if e_lat and e_lng:
                 dist = self._haversine(lat, lng, e_lat, e_lng)
@@ -1725,7 +1838,7 @@ class ZomatoClient:
             if venue not in by_venue:
                 by_venue[venue] = {
                     "name": venue,
-                    "address": e.get("address", ""),
+                    "address": e.get("address", "") or venue_detail.get("address", ""),
                     "city": e.get("city", ""),
                     "locality": e.get("locality", ""),
                     "lat": e_lat,
@@ -1733,14 +1846,32 @@ class ZomatoClient:
                     "distance_km": round(dist, 1),
                     "events": [],
                     "offers": [],
+                    "venue_details": venue_detail,
                     "source": "district",
                 }
+            normalized_title = e.get("title", "").strip().lower()
+            normalized_venue = venue.strip().lower()
+            detail = (
+                detail_by_url.get(e.get("url", "").rstrip("/"))
+                or detail_by_identity.get((normalized_title, normalized_venue))
+                or detail_by_name.get(normalized_title, {})
+            )
+            organizer = detail.get("organizer", {}) if isinstance(detail, dict) else {}
+            location_detail = detail.get("location", {}) if isinstance(detail, dict) else {}
+            ticket_offer = detail.get("offers", {}) if isinstance(detail, dict) else {}
             by_venue[venue]["events"].append({
                 "title": e.get("title", ""),
                 "date": e.get("date", ""),
                 "price": e.get("price", ""),
                 "category": e.get("category", ""),
                 "url": e.get("url", ""),
+                "description": detail.get("description", e.get("description", "")) if isinstance(detail, dict) else e.get("description", ""),
+                "organizer": organizer.get("name", "") if isinstance(organizer, dict) else "",
+                "start_date": detail.get("startDate", "") if isinstance(detail, dict) else "",
+                "end_date": detail.get("endDate", "") if isinstance(detail, dict) else "",
+                "ticket_offer": ticket_offer if isinstance(ticket_offer, (dict, list)) else {},
+                "detail_location": location_detail if isinstance(location_detail, dict) else {},
+                "detail_crawled": bool(detail),
             })
 
         results.extend(by_venue.values())
@@ -1790,6 +1921,369 @@ class ZomatoClient:
         results.sort(key=lambda x: (x["distance_km"] == 0, x["distance_km"]))
 
         return results
+
+    @staticmethod
+    def _district_http_get(
+        url: str,
+        *,
+        headers: dict[str, str],
+        params: dict[str, str] | None = None,
+        timeout: int = 15,
+        retries: int = 2,
+    ) -> requests.Response:
+        """Thread-safe District GET with bounded retry/backoff for 429/5xx."""
+        response: requests.Response | None = None
+        for attempt in range(retries + 1):
+            response = requests.get(url, headers=headers, params=params, timeout=timeout)
+            if response.status_code != 429 and response.status_code < 500:
+                return response
+            if attempt < retries:
+                time.sleep(0.5 * (2 ** attempt))
+        assert response is not None
+        return response
+
+    def _get_district_events_html(self, cache_seconds: int = 60) -> str:
+        """Fetch the discovery page once and briefly reuse it across crawl phases."""
+        cached_at = getattr(self, "_district_events_cached_at", 0.0)
+        cached_html = getattr(self, "_district_events_cached_html", "")
+        if cached_html and time.time() - cached_at < cache_seconds:
+            return cached_html
+        url = f"{ep.DISTRICT_BASE}{ep.DISTRICT_EVENTS_PAGE}"
+        response = self._district_http_get(
+            url,
+            headers={"User-Agent": USER_AGENT},
+        )
+        response.raise_for_status()
+        self._district_events_cached_html = response.text
+        self._district_events_cached_at = time.time()
+        return response.text
+
+    def get_district_venue_by_slug(self, slug: str) -> dict:
+        """Fetch a District venue page through its client-side venue API.
+
+        District's venue-guide HTML sets ``shouldFetchOnClient=true``. The
+        browser then calls this endpoint with a guest token and standard web
+        client headers. It returns venue details, event rails, opening hours,
+        coordinates, policies, facilities, gallery and linked dining menus.
+        """
+        url = f"{ep.DISTRICT_BASE}{ep.DISTRICT_VENUE_PAGE}"
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+            "x-app-type": ep.DISTRICT_WEB_APP_TYPE,
+            "x-client-id": ep.DISTRICT_WEB_CLIENT_ID,
+            "x-app-version": ep.DISTRICT_WEB_APP_VERSION,
+            "Referer": f"{ep.DISTRICT_BASE}/events/{slug}/venue-guide",
+        }
+        access_token = os.getenv("DISTRICT_ACCESS_TOKEN", "")
+        refresh_token = os.getenv("DISTRICT_REFRESH_TOKEN", "")
+        if access_token:
+            headers["x-access-token"] = access_token
+            if refresh_token:
+                headers["x-refresh-token"] = refresh_token
+        else:
+            headers["x-guest-token"] = ep.DISTRICT_GUEST_TOKEN
+        response = self._district_http_get(
+            url,
+            params={"venue_slug": slug},
+            headers=headers,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict) and data.get("status") == "STATUS_FAILURE":
+            raise ZomatoAPIError(data.get("message", "District venue API failed"))
+        return data if isinstance(data, dict) else {}
+
+    def crawl_individual_pages(
+        self,
+        include_events: bool = True,
+        include_venues: bool = True,
+        include_zomato_details: bool = True,
+        max_pages: int = 50,
+        city: str = "gurugram",
+    ) -> dict:
+        """Crawl individual District venue/event pages and cross-reference Zomato.
+
+        Starts from District.in's main events page, extracts all venue and event
+        slugs, then visits every individual page. District's individual pages
+        currently load their detail data client-side, so the crawler records
+        whether useful RSC data was found. Venue names are cross-referenced with
+        Zomato to fetch ratings, offers, reviews, and other restaurant details.
+
+        Args:
+            include_events: Crawl individual event pages
+            include_venues: Crawl individual venue pages
+            include_zomato_details: Cross-reference venue names on Zomato
+            max_pages: Maximum total pages to crawl
+            city: Zomato city context for restaurant search
+
+        Returns:
+            Dict with keys: venues, events, stats
+        """
+        import concurrent.futures
+
+        # Reuse the discovery HTML already fetched by get_events() when this
+        # crawl is part of find_party_places().
+        html = self._get_district_events_html()
+
+        # Extract combined RSC data using the same logic as _parse_district_events
+        combined = self._extract_district_rsc(html)
+
+        # Extract ItemDetails blocks
+        item_blocks: list[str] = []
+        idx = 0
+        while True:
+            pos = combined.find('"ItemDetails":{', idx)
+            if pos < 0:
+                break
+            brace_count = 0
+            start = pos + len('"ItemDetails":')
+            end = start
+            for j in range(start, min(start + 20000, len(combined))):
+                if combined[j] == '{':
+                    brace_count += 1
+                elif combined[j] == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end = j + 1
+                        break
+            item_blocks.append(combined[start:end])
+            idx = end
+
+        # Extract unique venue and event slugs
+        venue_map: dict[str, str] = {}
+        event_map: dict[str, str] = {}
+        for block in item_blocks:
+            if '"VenueData":{' in block:
+                slug_m = re.search(r'"slug"\s*:\s*"([^"]+)"', block)
+                name_m = re.search(
+                    r'"VenueData"\s*:\s*\{[^{]*?"name"\s*:\s*"([^"]+)"', block
+                )
+                if slug_m:
+                    venue_map[slug_m.group(1)] = name_m.group(1) if name_m else ""
+            if '"EventData":{' in block:
+                slug_m = re.search(r'"event_slug"\s*:\s*"([^"]+)"', block)
+                name_m = re.search(r'"name"\s*:\s*"([^"]{3,200})"', block)
+                if slug_m:
+                    event_map[slug_m.group(1)] = name_m.group(1) if name_m else ""
+
+        # Reserve crawl budget across venue guides and event detail pages.
+        max_pages = max(0, int(max_pages))
+        venue_items = list(venue_map.items()) if include_venues else []
+        event_items = list(event_map.items()) if include_events else []
+        if max_pages == 0:
+            venue_budget = 0
+        elif include_events and venue_items:
+            venue_budget = min(len(venue_items), max(1, max_pages // 3))
+        else:
+            venue_budget = min(len(venue_items), max_pages)
+        venue_items = venue_items[:venue_budget]
+
+        def crawl_page(item: tuple[str, str], page_type: str) -> dict:
+            slug, name = item
+            if page_type == "event":
+                url = f"{ep.DISTRICT_BASE}/events/{slug}-buy-tickets"
+            else:
+                url = f"{ep.DISTRICT_BASE}/events/{slug}/venue-guide"
+            try:
+                r = self._district_http_get(
+                    url,
+                    headers={"User-Agent": USER_AGENT},
+                )
+                if r.status_code >= 400:
+                    return {
+                        "slug": slug,
+                        "name": name,
+                        "url": url,
+                        "status": "not_found" if r.status_code == 404 else "error",
+                        "http_status": r.status_code,
+                        "error": "" if r.status_code == 404 else f"HTTP {r.status_code}",
+                        "events": [],
+                    }
+                page_html = r.text
+                rsc = self._extract_district_rsc(page_html)
+                parsed_events = self._parse_district_events(page_html)
+                venue_data: dict = {}
+                if page_type == "venue" and r.status_code < 400:
+                    try:
+                        venue_data = self.get_district_venue_by_slug(slug)
+                    except Exception:
+                        venue_data = {}
+
+                # Event detail pages expose rich schema.org JSON-LD even when
+                # ItemDetails is absent. Parse it as the canonical detail source.
+                json_ld_items: list[dict] = []
+                for match in re.finditer(
+                    r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
+                    page_html,
+                    re.DOTALL | re.IGNORECASE,
+                ):
+                    try:
+                        value = json.loads(match.group(1))
+                        if isinstance(value, dict):
+                            json_ld_items.append(value)
+                        elif isinstance(value, list):
+                            json_ld_items.extend(x for x in value if isinstance(x, dict))
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+                event_schema = next(
+                    (
+                        item for item in json_ld_items
+                        if item.get("@type") == "Event"
+                        or (
+                            isinstance(item.get("@type"), list)
+                            and "Event" in item.get("@type", [])
+                        )
+                    ),
+                    None,
+                )
+                has_detail_data = bool(
+                    venue_data or parsed_events or event_schema
+                    or "EventData" in rsc or "ItemDetails" in rsc
+                )
+                return {
+                    "slug": slug,
+                    "name": name,
+                    "url": url,
+                    "status": "ok",
+                    "http_status": r.status_code,
+                    "page_size": len(page_html),
+                    "rsc_size": len(rsc),
+                    "has_event_data": has_detail_data,
+                    "events": parsed_events,
+                    "venue_data": venue_data,
+                    "schema_event": event_schema,
+                    "json_ld": json_ld_items,
+                    "client_side_only": not has_detail_data,
+                }
+            except Exception as exc:
+                return {
+                    "slug": slug,
+                    "name": name,
+                    "url": url,
+                    "status": "error",
+                    "error": str(exc),
+                    "events": [],
+                }
+
+        # Phase 1: crawl a bounded share of venue pages. Their client API may
+        # reveal event slugs absent from the main discovery page.
+        venue_results: list[dict] = []
+        event_results: list[dict] = []
+        if venue_items:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+                venue_results = list(
+                    executor.map(lambda item: crawl_page(item, "venue"), venue_items)
+                )
+
+        venue_event_map: dict[str, str] = {}
+        for venue in venue_results:
+            venue_data = venue.get("venue_data", {})
+            if not isinstance(venue_data, dict):
+                continue
+            rails = venue_data.get("venue_page_rails") or venue_data.get("venue_events_by_categories") or []
+            for rail in rails if isinstance(rails, list) else []:
+                for item in rail.get("items", []) if isinstance(rail, dict) else []:
+                    if isinstance(item, dict) and item.get("slug"):
+                        venue_event_map[item["slug"]] = item.get("label", "")
+
+        # Phase 2: prioritize venue-only discoveries, then fill the remaining
+        # budget with event slugs already present on the main page.
+        combined_event_map = dict(venue_event_map)
+        combined_event_map.update(
+            {slug: name for slug, name in event_items if slug not in combined_event_map}
+        )
+        remaining_budget = max(0, max_pages - len(venue_results))
+        selected_events = list(combined_event_map.items())[:remaining_budget]
+        if selected_events:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+                event_results = list(
+                    executor.map(lambda item: crawl_page(item, "event"), selected_events)
+                )
+
+        # Cross-reference venue names on Zomato
+        if include_zomato_details:
+            for venue in venue_results:
+                name = venue.get("name", "")
+                if not name:
+                    continue
+                try:
+                    matches = self.search_restaurant_by_name(name, city=city)
+                    venue["zomato_matches"] = matches
+                    if matches:
+                        best = matches[0]
+                        res_id = best.get("resId")
+                        if res_id:
+                            venue["zomato_details"] = self.get_restaurant(int(res_id))
+                            venue["dining_offers"] = self.get_dining_offers(int(res_id))
+                    else:
+                        venue["zomato_details"] = None
+                        venue["dining_offers"] = []
+                except Exception as exc:
+                    venue["zomato_error"] = str(exc)
+                    venue["zomato_matches"] = []
+
+        # Sort for deterministic output
+        venue_results.sort(key=lambda x: x.get("name", ""))
+        event_results.sort(key=lambda x: x.get("name", ""))
+
+        return {
+            "venues": venue_results,
+            "events": event_results,
+            "stats": {
+                "venue_slugs_found": len(venue_map),
+                "event_slugs_found": len(set(event_map) | set(venue_event_map)),
+                "main_page_event_slugs_found": len(event_map),
+                "venue_page_event_slugs_found": len(venue_event_map),
+                "venue_pages_crawled": len(venue_results),
+                "event_pages_crawled": len(event_results),
+                "pages_with_embedded_data": sum(
+                    1 for x in venue_results + event_results
+                    if x.get("has_event_data")
+                ),
+                "client_side_only_pages": sum(
+                    1 for x in venue_results + event_results
+                    if x.get("client_side_only")
+                ),
+            },
+        }
+
+    def _extract_district_rsc(self, html: str) -> str:
+        """Extract and unescape all Next.js RSC push payloads from HTML."""
+        push_starts = [
+            m.start() for m in re.finditer(r'self\.__next_f\.push\(\[1,"', html)
+        ]
+        combined = ""
+        for start in push_starts:
+            content_start = html.find('[1,"', start) + 4
+            if content_start < 4:
+                continue
+            script_end = html.find("</script>", content_start)
+            if script_end < 0:
+                continue
+            push_end = html.rfind('"])', content_start, script_end)
+            if push_end < 0:
+                push_end = html.rfind('")', content_start, script_end)
+            if push_end < 0:
+                continue
+            chunk = html[content_start:push_end]
+            unescaped = (
+                chunk.replace('\\\\"', '"')
+                .replace('\\"', '"')
+                .replace("\\n", "\n")
+                .replace("\\\\", "\\")
+            )
+            combined += unescaped
+        return combined
+
+    @staticmethod
+    def _to_float(value: Any) -> float:
+        """Convert API coordinate values safely; malformed values become zero."""
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
 
     @staticmethod
     def _haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
