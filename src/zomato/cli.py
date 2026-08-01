@@ -45,7 +45,12 @@ def _print_reviews(reviews: list[dict]) -> None:
         user = rev.get("user_name", "Anonymous")
         text = rev.get("text", "")[:200]
         likes = rev.get("likes", 0)
-        print(f"  {i}. {rating}★ by {user} (👍 {likes})")
+        experience = rev.get("experience", "")
+        tags = rev.get("tags", [])
+        print(f"  {i}. {rating}★ by {user} (👍 {likes})" +
+              (f" [{experience}]" if experience else ""))
+        if tags:
+            print(f"     Tags: {', '.join(tags[:5])}")
         print(f"     {text}\n")
 
 
@@ -240,10 +245,120 @@ def cmd_collections(args: argparse.Namespace) -> None:
             print(f"     {c['url']}")
 
 
+def cmd_trends(args: argparse.Namespace) -> None:
+    """Show rating trend analysis for a restaurant."""
+    client = ZomatoClient()
+    trends = client.get_rating_trends(res_id=args.id, months=args.months)
+    if not trends:
+        print("No review data found for trend analysis.")
+        return
+    info = client.get_restaurant(res_id=args.id)
+    print(f"\n  {info.get('name', 'Unknown')} — Current: {info.get('rating', '?')}★")
+    print(f"  Rating trend (last {args.months} months):\n")
+    for t in trends:
+        bar_len = int(float(t["avg_rating"]) * 10) if t["avg_rating"] else 0
+        bar = "█" * (bar_len // 4) + "░" * (25 - bar_len // 4)
+        trend_icon = {"up": "📈", "down": "📉", "stable": "➡️"}.get(t["trend"], "")
+        print(f"  {t['month']}  {bar} {t['avg_rating']:.1f}  ({t['count']} reviews) {trend_icon}")
+    if args.json:
+        print(json.dumps(trends, indent=2, ensure_ascii=False))
+
+
+def cmd_dishes(args: argparse.Namespace) -> None:
+    """Show most mentioned dishes from reviews."""
+    client = ZomatoClient()
+    dishes = client.get_popular_dishes(res_id=args.id, limit=args.limit)
+    if not dishes:
+        print("No dish mentions found in reviews.")
+        return
+    info = client.get_restaurant(res_id=args.id)
+    print(f"\n  Most mentioned dishes at {info.get('name', 'Unknown')}:\n")
+    for i, d in enumerate(dishes, 1):
+        mentions = d["mentions"]
+        avg_rating = d.get("avg_rating", 0)
+        bar = "▓" * min(mentions, 30)
+        rating_str = f" {avg_rating:.1f}★" if avg_rating else ""
+        print(f"  {i:2d}. {d['dish']:<20} {bar} {mentions} mentions{rating_str}")
+    if args.json:
+        print(json.dumps(dishes, indent=2, ensure_ascii=False))
+
+
+def cmd_offers(args: argparse.Namespace) -> None:
+    """Show active offers at a restaurant."""
+    client = ZomatoClient()
+    offers = client.get_restaurant_offers(res_id=args.id)
+    if not offers:
+        print("No active offers found.")
+        return
+    info = client.get_restaurant(res_id=args.id)
+    print(f"\n  Active offers at {info.get('name', 'Unknown')}:\n")
+    for i, o in enumerate(offers, 1):
+        print(f"  {i}. {o.get('title', o.get('label', ''))}")
+        if o.get('description'):
+            print(f"     {o['description']}")
+        if o.get('code'):
+            print(f"     Code: {o['code']}")
+    if args.json:
+        print(json.dumps(offers, indent=2, ensure_ascii=False))
+
+
+def cmd_hygiene(args: argparse.Namespace) -> None:
+    """Show hygiene/safety details for a restaurant."""
+    client = ZomatoClient()
+    hygiene = client.get_hygiene_details(res_id=args.id)
+    if not hygiene:
+        print("No hygiene data available.")
+        return
+    info = client.get_restaurant(res_id=args.id)
+    print(f"\n  Hygiene details for {info.get('name', 'Unknown')}:\n")
+    if hygiene.get("valid_until"):
+        print(f"  Valid until:   {hygiene['valid_until']}")
+    if hygiene.get("audit_on"):
+        print(f"  Last audit:    {hygiene['audit_on']}")
+    sections = hygiene.get("sections", {})
+    if isinstance(sections, dict):
+        for sid, section in sections.items():
+            if not isinstance(section, dict):
+                continue
+            title = section.get("title", "")
+            subtitle = section.get("subtitle", "")
+            print(f"  {title}")
+            if subtitle:
+                print(f"     {subtitle}")
+    elif isinstance(sections, list):
+        for section in sections:
+            title = section.get("title", "") if isinstance(section, dict) else ""
+            subtitle = section.get("subtitle", "") if isinstance(section, dict) else ""
+            print(f"  {title}")
+            if subtitle:
+                print(f"     {subtitle}")
+    if args.json:
+        print(json.dumps(hygiene, indent=2, ensure_ascii=False))
+
+
+def cmd_value(args: argparse.Namespace) -> None:
+    """Show value-for-money analysis for a restaurant."""
+    client = ZomatoClient()
+    value = client.get_value_for_money(res_id=args.id)
+    if not value:
+        print("Could not compute value analysis.")
+        return
+    print(f"\n  {value.get('name', 'Unknown')}")
+    print(f"  Rating:        {value.get('rating', '?')}★")
+    print(f"  Cost for two:  {value.get('cost_for_two', '?')}")
+    print(f"  Cost per ★:   {value.get('cost_per_rating', '?')}")
+    verdict = value.get("verdict", "")
+    icons = {"great value": "💚", "good": "💛", "pricey": "❤️", "unknown": "❓"}
+    icon = icons.get(verdict, "")
+    print(f"  Verdict:       {icon} {verdict}")
+    if args.json:
+        print(json.dumps(value, indent=2, ensure_ascii=False))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="zomato",
-        description="Discover restaurants, reviews, and events on Zomato",
+        description="Discover restaurants, reviews, events, and more on Zomato",
     )
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -314,6 +429,38 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("collections", help="Get curated collections for a city")
     p.add_argument("--city", default="gurugram")
     p.set_defaults(func=cmd_collections)
+
+    # trends (NEW)
+    p = sub.add_parser("trends", help="Rating trend analysis for a restaurant")
+    p.add_argument("--id", type=int, required=True, help="Restaurant ID")
+    p.add_argument("--months", type=int, default=6, help="Number of months to analyze (default: 6)")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_trends)
+
+    # dishes (NEW)
+    p = sub.add_parser("dishes", help="Most mentioned dishes from reviews")
+    p.add_argument("--id", type=int, required=True, help="Restaurant ID")
+    p.add_argument("--limit", type=int, default=10, help="Max dishes to show")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_dishes)
+
+    # offers (NEW)
+    p = sub.add_parser("offers", help="Active offers at a restaurant")
+    p.add_argument("--id", type=int, required=True, help="Restaurant ID")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_offers)
+
+    # hygiene (NEW)
+    p = sub.add_parser("hygiene", help="Hygiene/safety details for a restaurant")
+    p.add_argument("--id", type=int, required=True, help="Restaurant ID")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_hygiene)
+
+    # value (NEW)
+    p = sub.add_parser("value", help="Value-for-money analysis for a restaurant")
+    p.add_argument("--id", type=int, required=True, help="Restaurant ID")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_value)
 
     return parser
 

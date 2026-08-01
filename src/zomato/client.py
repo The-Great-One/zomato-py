@@ -8,10 +8,14 @@ Zomato uses to determine the user's city.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import urllib.parse
+from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -51,6 +55,30 @@ CITY_IDS: dict[str, int] = {
     "faridabad": 12940,
 }
 
+# Common food keywords for dish extraction from review text
+FOOD_KEYWORDS: list[str] = [
+    "pizza", "burger", "pasta", "coffee", "momos", "biryani", "thali",
+    "dosa", "paneer", "chicken", "sandwich", "shake", "dessert", "cake",
+    "soup", "salad", "noodles", "tandoori", "kebab", "curry", "naan",
+    "roti", "idli", "samosa", "chaat", "paratha", "butter chicken",
+    "masala", "tikka", "ramen", "sushi", "tacos", "wraps", "pav bhaji",
+    "chole", "rajma", "dal", "pulao", "fried rice", "manchurian",
+    "spring rolls", "dim sum", "waffle", "pancake", "brownie", "ice cream",
+    "kulfi", "falooda", "mojito", "latte", "cappuccino", "tea", "chai",
+    "lassi", "juice", "smoothie", "cocktail", "mocktail", "beer", "wine",
+    "bowl", "fries", "nachos", "wings", "nuggets", "butter", "cheese",
+    "chocolate", "cookie", "pastry", "donut", "bagel", "muffin",
+    "risotto", "gnocchi", "ravioli", "tiramisu", "gelato", "espresso",
+    "mughlai", "shawarma", "falafel", "hummus", "pita", "biryani pot",
+    "hyderabadi", "lucknowi", "kacchi", "handi", "kadhai", "bhuna",
+    "rogan josh", "saag", "baingan", "bhindi", "aloo", "gobi",
+    "mediterranean", "continental", "italian", "chinese", "thai",
+    "mexican", "lebanese", "korean", "japanese", "american",
+    "south indian", "north indian", "mughlai", "bengali", "rajasthani",
+    "gujarati", "punjabi", "maharashtrian", "andhra", "chettinad",
+    "kerala", "goan", "kashmiri", "awadhi",
+]
+
 
 @dataclass
 class Location:
@@ -85,6 +113,10 @@ class ZomatoClient:
     No API key required. The client automatically manages CSRF tokens
     and session cookies, replicating the behavior of the Zomato web app.
 
+    Session persistence: CSRF tokens and cookies are saved to a JSON file
+    in ``cache_dir`` (default ``~/.zomato-py``) so they can be reused across
+    runs without re-fetching the CSRF token every time.
+
     Example:
         >>> client = ZomatoClient()
         >>> restaurants = client.search_restaurants(city="gurugram")
@@ -96,6 +128,7 @@ class ZomatoClient:
         self,
         location: Location | None = None,
         session: requests.Session | None = None,
+        cache_dir: str | Path | None = None,
     ) -> None:
         self.location = location or Location()
         self._session = session or requests.Session()
@@ -108,6 +141,50 @@ class ZomatoClient:
         self._csrf: str = ""
         self._csrf_time: float = 0
         self._csrf_max_age: int = 1800  # 30 minutes
+
+        # ── Persistent session ────────────────────────────────────
+        self._cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".zomato-py"
+        self._cache_file = self._cache_dir / "session.json"
+        self._load_session()
+
+    # ── Session persistence ──────────────────────────────────────
+
+    def _load_session(self) -> None:
+        """Load CSRF token and cookies from the cache file if available."""
+        try:
+            if self._cache_file.exists():
+                data = json.loads(self._cache_file.read_text())
+                csrf = data.get("csrf", "")
+                csrf_time = data.get("csrf_time", 0)
+                # Only restore if not expired
+                if csrf and (time.time() - csrf_time < self._csrf_max_age):
+                    self._csrf = csrf
+                    self._csrf_time = csrf_time
+                # Restore cookies
+                cookies = data.get("cookies", {})
+                for name, value in cookies.items():
+                    self._session.cookies.set(name, value, domain=".zomato.com", path="/")
+        except (json.JSONDecodeError, OSError, KeyError):
+            # Corrupt or missing cache — silently start fresh
+            pass
+
+    def _save_session(self) -> None:
+        """Save CSRF token and cookies to the cache file."""
+        try:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+            cookies: dict[str, str] = {}
+            for c in self._session.cookies:
+                if c.name not in cookies:
+                    cookies[c.name] = c.value
+            data = {
+                "csrf": self._csrf,
+                "csrf_time": self._csrf_time,
+                "cookies": cookies,
+            }
+            self._cache_file.write_text(json.dumps(data))
+        except OSError:
+            # Can't write cache — non-fatal, session just won't persist
+            pass
 
     # ── Internal helpers ──────────────────────────────────────────
 
@@ -125,11 +202,16 @@ class ZomatoClient:
         self._csrf_time = time.time()
         if not self._csrf:
             raise ZomatoAuthError("Failed to acquire CSRF token")
+        self._save_session()
         return self._csrf
 
     def _cookies(self) -> dict[str, str]:
         """Build the cookie dict including the locus location cookie."""
-        cookies = dict(self._session.cookies)
+        cookies: dict[str, str] = {}
+        for c in self._session.cookies:
+            # Only keep the first occurrence of each cookie name
+            if c.name not in cookies:
+                cookies[c.name] = c.value
         cookies["locus"] = self.location.to_cookie()
         cookies["lty"] = str(self.location.city_id)
         cookies["ltv"] = str(self.location.city_id)
@@ -470,6 +552,47 @@ class ZomatoClient:
             if isinstance(m, dict)
         ]
 
+    # ── Public API: Restaurant Offers & Hygiene ───────────────────
+
+    def get_restaurant_offers(self, res_id: int) -> list[dict]:
+        """Get available offers for a restaurant.
+
+        Calls the order/resOffer webroute and returns a list of offer dicts.
+        Some restaurants may return an empty list.
+
+        Args:
+            res_id: Zomato restaurant ID
+
+        Returns:
+            List of offer dicts. Each offer typically has fields like
+            title, description, code, type, etc.
+        """
+        data = self._get(ep.ORDER_RES_OFFER, params={"res_id": res_id})
+        offers = data.get("restaurantOffers", [])
+        if not isinstance(offers, list):
+            return []
+        return offers
+
+    def get_hygiene_details(self, res_id: int) -> dict:
+        """Get hygiene/audit details for a restaurant.
+
+        Calls the restaurant/getHygieneDetails webroute and returns a dict
+        with valid_until, audit_on, and sections data.
+
+        Args:
+            res_id: Zomato restaurant ID
+
+        Returns:
+            Dict with keys: valid_until, audit_on, sections
+        """
+        data = self._get(ep.RESTAURANT_HYGIENE, params={"res_id": res_id})
+        page_data = data.get("page_data", data)
+        return {
+            "valid_until": page_data.get("valid_until", ""),
+            "audit_on": page_data.get("audit_on", ""),
+            "sections": page_data.get("sections", page_data.get("content", {}).get("sections", {})),
+        }
+
     # ── Public API: Reviews ───────────────────────────────────────
 
     def get_reviews(
@@ -481,8 +604,17 @@ class ZomatoClient:
     ) -> list[dict]:
         """Get restaurant reviews.
 
-        Returns list of review dicts with keys: rating, text, user_name,
-        user_id, timestamp, likes, comments_count.
+        The Zomato reviews endpoint returns data in two possible structures:
+        - New format: ``entities.REVIEWS`` (dict keyed by review ID) with
+          ``page_data.sections.SECTION_REVIEWS`` containing entity_ids.
+        - Legacy format: ``page_data.sections.SECTION_REVIEW`` (dict or list
+          of review objects directly).
+
+        This method handles both formats transparently.
+
+        Returns list of review dicts with keys: review_id, rating,
+        rating_text, text, user_name, user_id, timestamp, likes,
+        comments_count, experience, review_tags, review_photos, review_url.
         """
         params: dict[str, Any] = {
             "res_id": res_id,
@@ -493,33 +625,331 @@ class ZomatoClient:
             params["sort"] = sort
 
         data = self._get(ep.REVIEWS_LOAD_MORE, params=params)
-        sections = data.get("page_data", {}).get("sections", {})
-        entities = sections.get("SECTION_REVIEW", {})
+
+        # ── New format: entities.REVIEWS (dict keyed by review ID) ──
+        entities = data.get("entities", {})
+        reviews_data = entities.get("REVIEWS", {})
+
+        # ── Fallback: legacy format — page_data.sections.SECTION_REVIEW ──
+        if not reviews_data:
+            sections = data.get("page_data", {}).get("sections", {})
+            # Try SECTION_REVIEW (singular, legacy) and SECTION_REVIEWS (plural)
+            reviews_data = sections.get("SECTION_REVIEW", sections.get("SECTION_REVIEWS", {}))
 
         reviews = []
-        if isinstance(entities, dict):
-            for key, review in entities.items():
+        if isinstance(reviews_data, dict):
+            for key, review in reviews_data.items():
                 if not isinstance(review, dict):
                     continue
                 reviews.append(self._parse_review(review))
-        elif isinstance(entities, list):
-            for review in entities:
+        elif isinstance(reviews_data, list):
+            for review in reviews_data:
                 if isinstance(review, dict):
                     reviews.append(self._parse_review(review))
         return reviews
 
     def _parse_review(self, raw: dict) -> dict:
-        """Parse a raw review entity."""
+        """Parse a raw review entity.
+
+        Handles both the new API field names (reviewId, ratingV2,
+        likeCount, commentCount, reviewUserId, reviewTags, etc.) and
+        legacy field names (id, rating, likesCount, commentsCount,
+        userId, ratingText) for backward compatibility.
+        """
         return {
-            "review_id": raw.get("id", ""),
-            "rating": raw.get("rating", "0"),
-            "rating_text": raw.get("ratingText", ""),
+            "review_id": raw.get("reviewId", raw.get("id", "")),
+            "rating": raw.get("ratingV2", raw.get("rating", "0")),
+            "rating_text": raw.get("ratingV2Text", raw.get("ratingText", "")),
             "text": raw.get("reviewText", ""),
             "user_name": raw.get("userName", ""),
-            "user_id": raw.get("userId", ""),
+            "user_id": raw.get("reviewUserId", raw.get("userId", "")),
             "timestamp": raw.get("timestamp", ""),
-            "likes": raw.get("likesCount", 0),
-            "comments_count": raw.get("commentsCount", 0),
+            "likes": raw.get("likeCount", raw.get("likesCount", 0)),
+            "comments_count": raw.get("commentCount", raw.get("commentsCount", 0)),
+            "experience": raw.get("experience", ""),
+            "review_tags": raw.get("reviewTags", []),
+            "review_photos": raw.get("reviewPhotos", []),
+            "review_url": raw.get("reviewUrl", ""),
+        }
+
+    # ── Public API: Rating Trends ─────────────────────────────────
+
+    def get_rating_trends(self, res_id: int, months: int = 6) -> list[dict]:
+        """Analyze rating trends over time for a restaurant.
+
+        Fetches reviews in batches (up to 200) and groups them by month,
+        calculating the average rating per month. The trend for each month
+        is determined by comparing to the previous month's average.
+
+        Args:
+            res_id: Zomato restaurant ID
+            months: Maximum number of recent months to return (default 6)
+
+        Returns:
+            List of dicts sorted by month (most recent first), each with:
+            - month: "YYYY-MM" string
+            - avg_rating: float, average rating for that month
+            - count: int, number of reviews in that month
+            - trend: "up", "down", or "stable" (compared to previous month)
+        """
+        # Fetch reviews in batches
+        all_reviews: list[dict] = []
+        batch_size = 10
+        max_reviews = 200
+
+        for offset in range(0, max_reviews, batch_size):
+            batch = self.get_reviews(res_id, offset=offset, limit=batch_size)
+            if not batch:
+                break
+            all_reviews.extend(batch)
+            if len(batch) < batch_size:
+                break
+
+        # Group reviews by month
+        monthly: dict[str, list[float]] = defaultdict(list)
+        for review in all_reviews:
+            timestamp = review.get("timestamp", "")
+            rating_str = str(review.get("rating", "0"))
+            if not timestamp or rating_str == "0":
+                continue
+
+            month_key = self._parse_timestamp_to_month(timestamp)
+            if month_key:
+                try:
+                    rating_val = float(rating_str)
+                    monthly[month_key].append(rating_val)
+                except (ValueError, TypeError):
+                    pass
+
+        # Build sorted list of months (most recent first)
+        sorted_months = sorted(monthly.keys(), reverse=True)[:months]
+
+        results: list[dict] = []
+        prev_avg: float | None = None
+
+        for month_key in sorted_months:
+            ratings = monthly[month_key]
+            avg = sum(ratings) / len(ratings) if ratings else 0
+
+            if prev_avg is not None:
+                diff = avg - prev_avg
+                if diff > 0.1:
+                    trend = "up"
+                elif diff < -0.1:
+                    trend = "down"
+                else:
+                    trend = "stable"
+            else:
+                trend = "stable"
+
+            results.append({
+                "month": month_key,
+                "avg_rating": round(avg, 2),
+                "count": len(ratings),
+                "trend": trend,
+            })
+            prev_avg = avg
+
+        return results
+
+    def _parse_timestamp_to_month(self, timestamp: str) -> str | None:
+        """Parse a review timestamp string to a 'YYYY-MM' key.
+
+        Handles formats like:
+        - "Jun 23, 2019"
+        - "2024-01-15"
+        - "January 15, 2024"
+        """
+        timestamp = timestamp.strip()
+        if not timestamp:
+            return None
+
+        # Try common formats
+        formats = [
+            "%b %d, %Y",      # Jun 23, 2019
+            "%B %d, %Y",      # January 23, 2019
+            "%Y-%m-%d",       # 2019-06-23
+            "%d %b %Y",       # 23 Jun 2019
+            "%d %B %Y",       # 23 January 2019
+            "%b %Y",          # Jun 2019
+            "%B %Y",          # January 2019
+            "%Y-%m",          # 2019-06
+        ]
+
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(timestamp, fmt)
+                return dt.strftime("%Y-%m")
+            except ValueError:
+                continue
+
+        # Try regex extraction for partial dates like "Jun 2019" or "2019"
+        m = re.match(r"(\w{3,9})\s+(\d{4})", timestamp)
+        if m:
+            month_str, year = m.group(1), m.group(2)
+            for fmt in ["%b %Y", "%B %Y"]:
+                try:
+                    dt = datetime.strptime(f"{month_str} {year}", fmt)
+                    return dt.strftime("%Y-%m")
+                except ValueError:
+                    continue
+
+        # Just a year
+        m = re.match(r"^(\d{4})$", timestamp)
+        if m:
+            return f"{m.group(1)}-00"
+
+        return None
+
+    # ── Public API: Popular Dishes ────────────────────────────────
+
+    def get_popular_dishes(self, res_id: int, limit: int = 10) -> list[dict]:
+        """Extract popular dishes mentioned in reviews.
+
+        Fetches up to 100 reviews and scans review text and review tags
+        for food keyword mentions. Returns dishes sorted by mention count,
+        with average rating of reviews mentioning each dish.
+
+        Args:
+            res_id: Zomato restaurant ID
+            limit: Maximum number of dishes to return (default 10)
+
+        Returns:
+            List of dicts sorted by mentions (descending), each with:
+            - dish: dish name (capitalized)
+            - mentions: number of reviews mentioning this dish
+            - avg_rating: average rating from reviews mentioning this dish
+        """
+        # Fetch up to 100 reviews
+        all_reviews: list[dict] = []
+        batch_size = 10
+        max_reviews = 100
+
+        for offset in range(0, max_reviews, batch_size):
+            batch = self.get_reviews(res_id, offset=offset, limit=batch_size)
+            if not batch:
+                break
+            all_reviews.extend(batch)
+            if len(batch) < batch_size:
+                break
+
+        # Track dish mentions and ratings
+        dish_mentions: dict[str, int] = defaultdict(int)
+        dish_ratings: dict[str, list[float]] = defaultdict(list)
+
+        for review in all_reviews:
+            text = (review.get("text", "") or "").lower()
+            try:
+                rating = float(review.get("rating", "0"))
+            except (ValueError, TypeError):
+                rating = 0
+
+            mentioned_dishes: set[str] = set()
+
+            # Check review text against food keywords
+            for keyword in FOOD_KEYWORDS:
+                if keyword in text:
+                    mentioned_dishes.add(keyword)
+
+            # Check review tags (list of dicts with "name" field)
+            review_tags = review.get("review_tags", [])
+            if isinstance(review_tags, list):
+                for tag in review_tags:
+                    if isinstance(tag, dict):
+                        tag_name = (tag.get("name", "") or "").lower().strip()
+                        if tag_name and tag_name not in mentioned_dishes:
+                            # Check if tag name contains a known food keyword
+                            for keyword in FOOD_KEYWORDS:
+                                if keyword in tag_name:
+                                    mentioned_dishes.add(keyword)
+                                    break
+                            else:
+                                # No keyword match — use the tag name itself
+                                # if it's short and looks like a dish
+                                if 2 < len(tag_name) < 40 and " " not in tag_name:
+                                    mentioned_dishes.add(tag_name)
+
+            for dish in mentioned_dishes:
+                dish_mentions[dish] += 1
+                dish_ratings[dish].append(rating)
+
+        # Build result list
+        dishes: list[dict] = []
+        for dish, mentions in dish_mentions.items():
+            ratings = dish_ratings[dish]
+            avg_rating = sum(ratings) / len(ratings) if ratings else 0
+            dishes.append({
+                "dish": dish.title(),
+                "mentions": mentions,
+                "avg_rating": round(avg_rating, 2),
+            })
+
+        # Sort by mention count (descending), then by avg_rating
+        dishes.sort(key=lambda d: (d["mentions"], d["avg_rating"]), reverse=True)
+
+        return dishes[:limit]
+
+    # ── Public API: Value for Money ───────────────────────────────
+
+    def get_value_for_money(self, res_id: int) -> dict:
+        """Calculate value-for-money metrics for a restaurant.
+
+        Fetches restaurant details and computes cost_per_rating =
+        cost_for_two / rating. A lower cost_per_rating indicates better
+        value for money.
+
+        Args:
+            res_id: Zomato restaurant ID
+
+        Returns:
+            Dict with keys: name, rating, cost_for_two, cost_per_rating,
+            verdict. Verdict thresholds:
+            - "great value": cost_per_rating < 100
+            - "good": cost_per_rating 100–200
+            - "pricey": cost_per_rating > 200
+        """
+        info = self.get_restaurant(res_id)
+        name = info.get("name", "")
+        rating_str = str(info.get("rating", "0"))
+        cost_str = info.get("cost_for_two", "")
+
+        # Parse numeric rating
+        try:
+            rating = float(rating_str)
+        except (ValueError, TypeError):
+            rating = 0
+
+        # Parse cost for two — extract digits from strings like "₹600 for two people"
+        cost_digits = re.findall(r"[\d,]+", cost_str.replace("₹", "").replace("Rs.", "").replace("Rs", ""))
+        cost_for_two = 0
+        if cost_digits:
+            try:
+                cost_for_two = int(cost_digits[0].replace(",", ""))
+            except (ValueError, IndexError):
+                cost_for_two = 0
+
+        # Calculate cost per rating
+        if rating > 0:
+            cost_per_rating = cost_for_two / rating
+        else:
+            cost_per_rating = 0
+
+        # Determine verdict
+        if cost_per_rating == 0:
+            verdict = "unknown"
+        elif cost_per_rating < 100:
+            verdict = "great value"
+        elif cost_per_rating <= 200:
+            verdict = "good"
+        else:
+            verdict = "pricey"
+
+        return {
+            "name": name,
+            "rating": rating,
+            "cost_for_two": cost_for_two,
+            "cost_per_rating": round(cost_per_rating, 2),
+            "verdict": verdict,
         }
 
     # ── Public API: Collections ──────────────────────────────────
@@ -663,7 +1093,7 @@ class ZomatoClient:
                 push_end = html.rfind('")', content_start, script_end)
             chunk = html[content_start:push_end]
             unescaped = (
-                chunk.replace('\\\\"', '"')
+                chunk.replace('\\"', '"')
                 .replace('\\"', '"')
                 .replace("\\n", "\n")
                 .replace("\\\\", "\\")
@@ -766,11 +1196,20 @@ class ZomatoClient:
                     "rating": "",
                     "review_count": 0,
                     "image_url": "",
+                    "image_gallery": [],
+                    "video_url": "",
                     "url": "",
                     "start_epoch": 0,
                     "end_epoch": 0,
                     "is_activity": False,
                     "address": addr,
+                    "offer_string": "",
+                    "popularity_score": 0,
+                    "number_attended": 0,
+                    "distance": "",
+                    "lat": "",
+                    "long": "",
+                    "date_string_v2": "",
                 })
                 continue
 
@@ -808,6 +1247,10 @@ class ZomatoClient:
             elif date_m and date_m.group(1):
                 date_str = date_m.group(1)
 
+            # Extract date_string_v2 (alternate date format)
+            date_v2_m = re.search(r'"date_string_v2"\s*:\s*"([^"]+)"', block)
+            date_string_v2 = date_v2_m.group(1) if date_v2_m else ""
+
             # Extract description (lowercase = real description)
             desc_m = re.search(r'"description"\s*:\s*"([^"]{20,500})"', block)
             desc = desc_m.group(1) if desc_m else ""
@@ -821,11 +1264,11 @@ class ZomatoClient:
             slug = slug_m.group(1) if slug_m else ""
 
             # Extract start_time_epoch for sorting
-            epoch_m = re.search(r'"start_time_epoch"\s*:\s*"?(\d+)"?', block)
+            epoch_m = re.search(r'"start_time_epoch"\s*:\s*"?(\\d+)"?', block)
             epoch = int(epoch_m.group(1)) if epoch_m else 0
 
             # Extract end_time_epoch for date filtering
-            end_epoch_m = re.search(r'"end_time_epoch"\s*:\s*"?(\d+)"?', block)
+            end_epoch_m = re.search(r'"end_time_epoch"\s*:\s*"?(\\d+)"?', block)
             end_epoch = int(end_epoch_m.group(1)) if end_epoch_m else 0
 
             # Extract locality
@@ -850,9 +1293,46 @@ class ZomatoClient:
                 img_m = re.search(r'"(https://media\.insider\.in/image/[^"]+)"', block)
             image_url = img_m.group(1) if img_m else ""
 
+            # Extract image gallery (multiple image URLs)
+            image_gallery: list[str] = []
+            for g_m in re.finditer(r'"(https://cdn\.district\.in/assets/events/[^"]+)"', block):
+                url = g_m.group(1)
+                if url not in image_gallery:
+                    image_gallery.append(url)
+            for g_m in re.finditer(r'"(https://media\.insider\.in/image/[^"]+)"', block):
+                url = g_m.group(1)
+                if url not in image_gallery:
+                    image_gallery.append(url)
+            # If we only found one image, keep it as the gallery
+            if not image_gallery and image_url:
+                image_gallery = [image_url]
+
+            # Extract video URL
+            video_m = re.search(r'"(https://[^"]*(?:video|youtube|youtu\.be|vimeo)[^"]*)"', block, re.IGNORECASE)
+            video_url = video_m.group(1) if video_m else ""
+
             # Extract is_activity flag (water parks, go-karting, arcades)
             is_activity_m = re.search(r'"is_activity"\s*:\s*(true|false)', block)
             is_activity = is_activity_m.group(1) == "true" if is_activity_m else False
+
+            # Extract additional EventData fields
+            offer_m = re.search(r'"offer_string"\s*:\s*"([^"]*)"', block)
+            offer_string = offer_m.group(1) if offer_m else ""
+
+            popularity_m = re.search(r'"popularity_score"\s*:\s*"?([\d.]+)"?', block)
+            popularity_score = float(popularity_m.group(1)) if popularity_m else 0
+
+            attended_m = re.search(r'"number_attended"\s*:\s*"?(\d+)"?', block)
+            number_attended = int(attended_m.group(1)) if attended_m else 0
+
+            distance_m = re.search(r'"distance"\s*:\s*"([^"]*)"', block)
+            distance = distance_m.group(1) if distance_m else ""
+
+            lat_m = re.search(r'"lat"\s*:\s*"?(-?[\d.]+)"?', block)
+            lat = lat_m.group(1) if lat_m else ""
+
+            long_m = re.search(r'"long"\s*:\s*"?(-?[\d.]+)"?', block)
+            lng = long_m.group(1) if long_m else ""
 
             events.append({
                 "title": name,
@@ -868,11 +1348,20 @@ class ZomatoClient:
                 "rating": rating,
                 "review_count": review_count,
                 "image_url": image_url,
+                "image_gallery": image_gallery,
+                "video_url": video_url,
                 "url": f"{ep.DISTRICT_BASE}/events/{slug}" if slug else "",
                 "start_epoch": epoch,
                 "end_epoch": end_epoch,
                 "is_activity": is_activity,
                 "address": "",
+                "offer_string": offer_string,
+                "popularity_score": popularity_score,
+                "number_attended": number_attended,
+                "distance": distance,
+                "lat": lat,
+                "long": lng,
+                "date_string_v2": date_string_v2,
             })
 
         # Classify events

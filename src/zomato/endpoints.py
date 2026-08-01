@@ -65,6 +65,9 @@ PHOTOS_COMMENT_DELETE = "/webroutes/photos/comment/delete"
 # Menu
 MENU_VIEW = "/webroutes/menu/viewMenu"
 
+# Offers
+ORDER_RES_OFFER = "/webroutes/order/resOffer"
+
 # Kitchen (Zomato Kitchen / commercial)
 KITCHEN_CITY = "/webroutes/kitchen/city"
 KITCHEN_LEADS = "/webroutes/kitchen/leads"
@@ -152,6 +155,7 @@ READ_ONLY_ENDPOINTS = [
     PHOTOS_GALLERY,
     PHOTOS_LOAD_MORE,
     MENU_VIEW,
+    ORDER_RES_OFFER,
     KITCHEN_CITY,
     BLOG_POSTS,
     AWARDS_WINNERS,

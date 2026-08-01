@@ -21,9 +21,12 @@ CSRF_TOKEN = "test_csrf_token_12345"
 
 
 @pytest.fixture
-def client():
-    """ZomatoClient with mocked session."""
-    c = ZomatoClient(location=Location(lat=28.4595, lng=77.0266, city_id=12939, city_name="Gurugram"))
+def client(tmp_path):
+    """ZomatoClient with mocked session and isolated cache dir."""
+    c = ZomatoClient(
+        location=Location(lat=28.4595, lng=77.0266, city_id=12939, city_name="Gurugram"),
+        cache_dir=str(tmp_path / ".zomato-py"),
+    )
     return c
 
 
