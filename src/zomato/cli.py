@@ -59,13 +59,20 @@ def _print_events(events: list[dict]) -> None:
         venue = e.get("venue", "")
         city = e.get("city", "")
         category = e.get("category", "")
+        date = e.get("date", "")
+        desc = e.get("description", "")
         print(f"  {i:2d}. {title}")
+        if date:
+            print(f"      📅 {date}")
         if venue:
             print(f"      📍 {venue}")
         if city:
             print(f"      🏙️  {city}")
         if category:
             print(f"      🎭 {category}")
+        if desc:
+            # Truncate description to 150 chars
+            print(f"      📝 {desc[:150]}")
 
 
 def _print_locations(locations: list[dict]) -> None:
@@ -118,6 +125,16 @@ def cmd_reviews(args: argparse.Namespace) -> None:
 def cmd_events(args: argparse.Namespace) -> None:
     client = ZomatoClient()
     events = client.get_events(city=args.city, category=args.category)
+    # Filter by keyword query (searches title, venue, description)
+    if args.query:
+        q = args.query.lower()
+        events = [
+            e for e in events
+            if q in e.get("title", "").lower()
+            or q in e.get("venue", "").lower()
+            or q in e.get("description", "").lower()
+            or q in e.get("category", "").lower()
+        ]
     if args.limit:
         events = events[:args.limit]
     _print_events(events)
@@ -202,6 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("events", help="Discover events near you")
     p.add_argument("--city", default="gurugram")
     p.add_argument("--category", default="")
+    p.add_argument("--query", default="", help="Keyword search (e.g. 'sufi', 'comedy', 'live music')")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_events)

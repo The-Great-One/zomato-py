@@ -630,11 +630,10 @@ class ZomatoClient:
         """Parse events from District RSC (React Server Component) HTML.
 
         District uses Next.js RSC which streams data via self.__next_f.push().
-        We extract the RSC payload, unescape it, and parse event data.
+        We extract ItemDetails blocks from the RSC payload, each containing
+        a complete event with name, venue, city, date, and description.
         """
         # Extract all __next_f pushes by finding script boundaries
-        # The regex (.*?) fails on escaped quotes inside pushes, so we
-        # extract by finding each push and its closing </script> tag.
         push_starts = [
             m.start() for m in re.finditer(r'self\.__next_f\.push\(\[1,"', html)
         ]
@@ -661,103 +660,113 @@ class ZomatoClient:
             )
             combined += unescaped
 
-        # Extract event data from the RSC payload
-        # District uses "name" for event/restaurant names and "title" for UI section headers
-        events = []
+        # Find all ItemDetails blocks — each contains a complete event/venue/artist
+        item_blocks: list[str] = []
+        idx = 0
+        while True:
+            pos = combined.find('"ItemDetails":{', idx)
+            if pos < 0:
+                break
+            # Find matching closing brace
+            brace_count = 0
+            start = pos + len('"ItemDetails":')
+            end = start
+            for j in range(start, min(start + 10000, len(combined))):
+                if combined[j] == '{':
+                    brace_count += 1
+                elif combined[j] == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end = j + 1
+                        break
+            item_blocks.append(combined[start:end])
+            idx = end
 
-        # Find all event names — these are in "name" fields within ItemDetails/EditorialData
-        # Pattern: "name":"Event Name" where the name is not a UI label
-        name_pattern = re.findall(
-            r'"name"\s*:\s*"([^"]{3,200})"', combined
-        )
-
-        # Find venue names
-        venue_pattern = re.findall(
-            r'"venue_name"\s*:\s*"([^"]+)"', combined
-        )
-
-        # Find cities — District uses "city" field (not "city_name")
-        city_pattern = re.findall(
-            r'"city"\s*:\s*"([^"]+)"', combined
-        )
-
-        # Find category/genre info
-        genre_pattern = re.findall(
-            r'"genre"\s*:\s*"([^"]+)"', combined
-        )
-
-        # Find image URLs
-        image_pattern = re.findall(
-            r'"(https://cdn\.district\.in/assets/events/[^"]+)"',
-            combined,
-        )
-
-        # Find event URLs
-        url_pattern = re.findall(
-            r'"(/event/[^"]+)"', combined
-        )
-
-        # UI label titles to exclude (these are section headers, not event names)
-        ui_labels = {
-            "featured events", "explore events",
-            "happening at venues near you",
-            "offers for you", "today", "tomorrow",
-            "this weekend", "happening around you",
-            "artists in your district", "all events",
-            "events", "movies", "all movies",
-            "city tours", "historical tours", "tours",
-            "food & drink", "comedy shows", "music shows",
-            "workshops", "kids", "amusement parks",
-            "district offer logged out after 3 new designs",
-        }
-
-        # Patterns that indicate a non-event name (Next.js components, metadata, SEO tags)
+        # Skip patterns for non-event names
         skip_patterns = (
             "Next.", "Metadata", "$L", "$S", "I[", "HC[",
-            "default", "props", "children",
-            "twitter:", "og:", "description", "image", "url",
-            "schema", "ItemList", "AggregateRating",
-            "application/ld+json", "dangerouslySetInnerHTML",
-            "District by Zomato", "Get Upcoming Events",
-            "googlebot", "robots", "viewport", "referrer",
-            "content-type", "X-UA-Compatible", "charset",
-            "width=device-width", "application/json",
-            "stylesheet", "preconnect", "prefetch",
-            "noopener", "noreferrer", "dns-prefetch",
-            "EditURI", "wlwmanifest", "canonical",
-            "shortlink", "pingback",
+            "twitter:", "og:", "viewport", "robots", "googlebot",
+            "Events Home", "Messi Banner", "Search",
+            "Music Event", "Nightlife Event", "Comedy Event",
+            "Sports Event", "Performances Event",
         )
 
-        # Combine all data points
-        max_len = max(
-            len(name_pattern),
-            len(venue_pattern),
-            len(city_pattern),
-            1,
-        )
+        ui_labels = {
+            "events", "featured events", "movies", "all events",
+            "all movies", "today", "tomorrow", "this weekend",
+        }
 
-        seen_names = set()
-        for i in range(max_len):
-            name = name_pattern[i] if i < len(name_pattern) else ""
-            if not name or name in seen_names:
+        events: list[dict[str, Any]] = []
+        seen_names: set[str] = set()
+
+        for block in item_blocks:
+            # Extract name
+            name_m = re.search(r'"name"\s*:\s*"([^"]{3,200})"', block)
+            if not name_m:
                 continue
-            # Skip UI labels and non-event names
+            name = name_m.group(1)
+            if name in seen_names:
+                continue
             if name.lower() in ui_labels:
                 continue
-            # Skip Next.js component/metadata names
             if any(p in name for p in skip_patterns):
                 continue
             seen_names.add(name)
 
-            event: dict[str, Any] = {
+            # Extract venue_name
+            venue_m = re.search(r'"venue_name"\s*:\s*"([^"]+)"', block)
+            venue = venue_m.group(1) if venue_m else ""
+
+            # Extract city
+            city_m = re.search(r'"city"\s*:\s*"([^"]+)"', block)
+            city = city_m.group(1) if city_m else ""
+
+            # Extract date — prefer next_event_date_string, fallback to date_string
+            next_date_m = re.search(r'"next_event_date_string"\s*:\s*"([^"]+)"', block)
+            date_m = re.search(r'"date_string"\s*:\s*"([^"]+)"', block)
+            date_str = ""
+            if next_date_m and next_date_m.group(1):
+                date_str = next_date_m.group(1)
+            elif date_m and date_m.group(1):
+                date_str = date_m.group(1)
+
+            # Extract description (lowercase = real description)
+            desc_m = re.search(r'"description"\s*:\s*"([^"]{20,500})"', block)
+            desc = desc_m.group(1) if desc_m else ""
+
+            # Extract tag_line
+            tag_m = re.search(r'"tag_line"\s*:\s*"([^"]+)"', block)
+            tag_line = tag_m.group(1) if tag_m else ""
+
+            # Extract event slug for URL
+            slug_m = re.search(r'"event_slug"\s*:\s*"([^"]+)"', block)
+            slug = slug_m.group(1) if slug_m else ""
+
+            # Extract start_time_epoch for sorting
+            epoch_m = re.search(r'"start_time_epoch"\s*:\s*"?(\d+)"?', block)
+            epoch = int(epoch_m.group(1)) if epoch_m else 0
+
+            # Extract image
+            img_m = re.search(r'"(https://cdn\.district\.in/assets/events/[^"]+)"', block)
+            if not img_m:
+                img_m = re.search(r'"(https://media\.insider\.in/image/[^"]+)"', block)
+            image_url = img_m.group(1) if img_m else ""
+
+            events.append({
                 "title": name,
-                "venue": venue_pattern[i] if i < len(venue_pattern) else "",
-                "city": city_pattern[i] if i < len(city_pattern) else "",
-                "category": genre_pattern[i] if i < len(genre_pattern) else "",
-                "image_url": image_pattern[i] if i < len(image_pattern) else "",
-                "url": f"{ep.DISTRICT_BASE}{url_pattern[i]}" if i < len(url_pattern) else "",
-            }
-            events.append(event)
+                "venue": venue,
+                "city": city,
+                "date": date_str,
+                "description": desc,
+                "tag_line": tag_line,
+                "category": "",
+                "image_url": image_url,
+                "url": f"{ep.DISTRICT_BASE}/events/{slug}" if slug else "",
+                "start_epoch": epoch,
+            })
+
+        # Sort by start_epoch (earliest first, 0 = unknown goes last)
+        events.sort(key=lambda e: (e["start_epoch"] == 0, e["start_epoch"]))
 
         return events
 

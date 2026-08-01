@@ -337,10 +337,10 @@ class TestErrorHandling:
 class TestDistrictEvents:
     @responses.activate
     def test_get_events(self, client):
-        # Mock the District events page HTML
+        # Mock the District events page HTML with an ItemDetails block
         html = '''<html><body>
         <script>self.__next_f.push([1,"4:dummy"])</script>
-        <script>self.__next_f.push([1,"some_rsc_data_with_\\"name\\":\\"Test Concert\\",\\"venue_name\\":\\"Saket Social\\",\\"city\\":\\"Delhi/NCR\\",\\"genre\\":\\"Music\\",\\"(https://cdn.district.in/assets/events/publisher/event_gallery/test.jpg)\\""])</script>
+        <script>self.__next_f.push([1,"some_data_with_\\"ItemDetails\\":{\\"EventData\\":{\\"name\\":\\"Test Concert\\",\\"venue_name\\":\\"Saket Social\\",\\"city\\":\\"Delhi/NCR\\",\\"date_string\\":\\"1 Aug, 7PM\\",\\"description\\":\\"A live music concert\\",\\"event_slug\\":\\"test-concert-2026\\"}}"])</script>
         </body></html>'''
         responses.add(
             responses.GET,
@@ -351,6 +351,11 @@ class TestDistrictEvents:
         events = client.get_events(city="")
         # Should find at least one event
         assert any(e.get("title") == "Test Concert" for e in events)
+        if events:
+            e = events[0]
+            assert e["venue"] == "Saket Social"
+            assert e["city"] == "Delhi/NCR"
+            assert e["date"] == "1 Aug, 7PM"
 
     @responses.activate
     def test_get_events_empty(self, client):
