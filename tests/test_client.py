@@ -428,6 +428,24 @@ class TestDistrictIndividualPages:
         )
 
     @responses.activate
+    def test_get_district_venue_by_slug_uses_runtime_guest_token_env_override(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setenv("DISTRICT_GUEST_TOKEN", "runtime-guest-token")
+        responses.add(
+            responses.GET,
+            f"{ep.DISTRICT_BASE}{ep.DISTRICT_VENUE_PAGE}",
+            json={"name": "Rail Venue"},
+            status=200,
+        )
+
+        client.get_district_venue_by_slug("rail-venue")
+
+        assert responses.calls[0].request.headers["x-guest-token"] == (
+            "runtime-guest-token"
+        )
+
+    @responses.activate
     def test_crawl_uses_canonical_routes_parses_json_ld_and_recurses_into_venue_rails(self, client):
         main_payload = {
             "ItemDetails": {
@@ -504,6 +522,57 @@ class TestDistrictIndividualPages:
         assert f"{ep.DISTRICT_BASE}/events/rail-venue/venue-guide" in requested_urls
         assert f"{ep.DISTRICT_BASE}/events/listed-party-buy-tickets" in requested_urls
         assert f"{ep.DISTRICT_BASE}/events/hidden-party-buy-tickets" in requested_urls
+
+    @responses.activate
+    def test_crawl_venues_only_sends_no_event_detail_requests(self, client):
+        main_payload = {
+            "ItemDetails": {
+                "VenueData": {"name": "Rail Venue", "slug": "rail-venue"}
+            },
+            "second": {
+                "ItemDetails": {
+                    "EventData": {"name": "Listed Party", "event_slug": "listed-party"}
+                }
+            },
+        }
+        responses.add(
+            responses.GET,
+            f"{ep.DISTRICT_BASE}{ep.DISTRICT_EVENTS_PAGE}",
+            body=_district_rsc_html(main_payload),
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{ep.DISTRICT_BASE}/events/rail-venue/venue-guide",
+            body="<html><body>client rendered venue</body></html>",
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{ep.DISTRICT_BASE}{ep.DISTRICT_VENUE_PAGE}",
+            json={
+                "name": "Rail Venue",
+                "venue_page_rails": [
+                    {
+                        "title": "More events",
+                        "items": [{"label": "Hidden Party", "slug": "hidden-party"}],
+                    }
+                ],
+            },
+            status=200,
+        )
+
+        crawl = client.crawl_individual_pages(
+            include_events=False,
+            include_venues=True,
+            include_zomato_details=False,
+            max_pages=10,
+        )
+
+        requested_urls = [call.request.url.split("?")[0] for call in responses.calls]
+        assert not any(url.endswith("-buy-tickets") for url in requested_urls)
+        assert crawl["events"] == []
+        assert crawl["stats"]["event_pages_crawled"] == 0
 
     def test_find_party_places_merges_weekend_rail_event_with_distance_and_json_ld_detail(self, client):
         venue_data = {
@@ -587,6 +656,66 @@ class TestDistrictIndividualPages:
         assert event["url"] == (
             f"{ep.DISTRICT_BASE}/events/hidden-saturday-party-buy-tickets"
         )
+
+    def test_find_party_places_does_not_name_match_ambiguous_event_details(self, client):
+        schemas = [
+            {
+                "@type": "Event",
+                "name": "Duplicate Night",
+                "description": "Venue A detail",
+                "location": {"name": "Venue A"},
+            },
+            {
+                "@type": "Event",
+                "name": "Duplicate Night",
+                "description": "Venue B detail",
+                "location": {"name": "Venue B"},
+            },
+        ]
+        crawl = {
+            "venues": [],
+            "events": [
+                {
+                    "name": "Duplicate Night",
+                    "url": f"{ep.DISTRICT_BASE}/events/duplicate-a-buy-tickets",
+                    "schema_event": schemas[0],
+                },
+                {
+                    "name": "Duplicate Night",
+                    "url": f"{ep.DISTRICT_BASE}/events/duplicate-b-buy-tickets",
+                    "schema_event": schemas[1],
+                },
+            ],
+            "stats": {},
+        }
+        listing_event = {
+            "title": "Duplicate Night",
+            "venue": "Venue C",
+            "city": "Gurugram",
+            "date": "Every Sat",
+            "description": "Listing description",
+            "url": f"{ep.DISTRICT_BASE}/events/duplicate-c-buy-tickets",
+            "start_epoch": 0,
+            "end_epoch": 0,
+            "is_activity": False,
+            "lat": 28.4595,
+            "long": 77.0266,
+        }
+
+        with (
+            patch.object(client, "get_events", return_value=[listing_event]),
+            patch.object(client, "crawl_individual_pages", return_value=crawl),
+            patch.object(client, "search_restaurants", return_value=[]),
+        ):
+            places = client.find_party_places(
+                include_offers=False,
+                when="",
+            )
+
+        event = places[0]["events"][0]
+        assert event["detail_crawled"] is False
+        assert event["description"] == "Listing description"
+        assert event["detail_location"] == {}
 
     def test_find_party_places_computes_distance_from_string_coordinates(self, client):
         event = {

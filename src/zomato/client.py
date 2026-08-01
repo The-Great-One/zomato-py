@@ -1741,7 +1741,7 @@ class ZomatoClient:
 
         # Crawl individual venue/event pages and use their schema.org data to
         # enrich the cards returned by the main listing page.
-        detail_by_name: dict[str, dict] = {}
+        detail_candidates_by_name: dict[str, list[dict]] = defaultdict(list)
         detail_by_url: dict[str, dict] = {}
         detail_by_identity: dict[tuple[str, str], dict] = {}
         venue_detail_by_name: dict[str, dict] = {}
@@ -1758,7 +1758,8 @@ class ZomatoClient:
                     schema = page.get("schema_event")
                     if isinstance(schema, dict):
                         normalized_name = page.get("name", "").strip().lower()
-                        detail_by_name[normalized_name] = schema
+                        if normalized_name:
+                            detail_candidates_by_name[normalized_name].append(schema)
                         page_url = page.get("url", "").rstrip("/")
                         if page_url:
                             detail_by_url[page_url] = schema
@@ -1851,10 +1852,12 @@ class ZomatoClient:
                 }
             normalized_title = e.get("title", "").strip().lower()
             normalized_venue = venue.strip().lower()
+            name_candidates = detail_candidates_by_name.get(normalized_title, [])
+            name_detail = name_candidates[0] if len(name_candidates) == 1 else {}
             detail = (
                 detail_by_url.get(e.get("url", "").rstrip("/"))
                 or detail_by_identity.get((normalized_title, normalized_venue))
-                or detail_by_name.get(normalized_title, {})
+                or name_detail
             )
             organizer = detail.get("organizer", {}) if isinstance(detail, dict) else {}
             location_detail = detail.get("location", {}) if isinstance(detail, dict) else {}
@@ -1982,7 +1985,9 @@ class ZomatoClient:
             if refresh_token:
                 headers["x-refresh-token"] = refresh_token
         else:
-            headers["x-guest-token"] = ep.DISTRICT_GUEST_TOKEN
+            headers["x-guest-token"] = os.getenv(
+                "DISTRICT_GUEST_TOKEN", ep.DISTRICT_GUEST_TOKEN
+            )
         response = self._district_http_get(
             url,
             params={"venue_slug": slug},
@@ -2178,15 +2183,16 @@ class ZomatoClient:
                 )
 
         venue_event_map: dict[str, str] = {}
-        for venue in venue_results:
-            venue_data = venue.get("venue_data", {})
-            if not isinstance(venue_data, dict):
-                continue
-            rails = venue_data.get("venue_page_rails") or venue_data.get("venue_events_by_categories") or []
-            for rail in rails if isinstance(rails, list) else []:
-                for item in rail.get("items", []) if isinstance(rail, dict) else []:
-                    if isinstance(item, dict) and item.get("slug"):
-                        venue_event_map[item["slug"]] = item.get("label", "")
+        if include_events:
+            for venue in venue_results:
+                venue_data = venue.get("venue_data", {})
+                if not isinstance(venue_data, dict):
+                    continue
+                rails = venue_data.get("venue_page_rails") or venue_data.get("venue_events_by_categories") or []
+                for rail in rails if isinstance(rails, list) else []:
+                    for item in rail.get("items", []) if isinstance(rail, dict) else []:
+                        if isinstance(item, dict) and item.get("slug"):
+                            venue_event_map[item["slug"]] = item.get("label", "")
 
         # Phase 2: prioritize venue-only discoveries, then fill the remaining
         # budget with event slugs already present on the main page.
@@ -2195,7 +2201,11 @@ class ZomatoClient:
             {slug: name for slug, name in event_items if slug not in combined_event_map}
         )
         remaining_budget = max(0, max_pages - len(venue_results))
-        selected_events = list(combined_event_map.items())[:remaining_budget]
+        selected_events = (
+            list(combined_event_map.items())[:remaining_budget]
+            if include_events
+            else []
+        )
         if selected_events:
             with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
                 event_results = list(
