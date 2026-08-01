@@ -171,6 +171,8 @@ def cmd_restaurant_events(args: argparse.Namespace) -> None:
             r for r in restaurants
             if any(cat in ev.get("category", "").lower() for ev in r.get("events", []))
         ]
+    if args.limit and args.limit > 0:
+        restaurants = restaurants[:args.limit]
     if not restaurants:
         print("No restaurants with events found.")
         return
@@ -284,6 +286,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--when", default="", help="'today', 'tomorrow', 'weekend', 'YYYY-MM-DD', or empty for all upcoming")
     p.add_argument("--query", default="", help="Keyword filter (e.g. 'sufi', 'live', 'comedy')")
     p.add_argument("--category", default="", help="Filter by category: comedy, live music, party, food, theatre, watch party")
+    p.add_argument("-n", "--limit", type=int, default=0, help="Max number of restaurants to show (0 = all)")
     p.add_argument("--include-activities", action="store_true", help="Include water parks, go-karting, arcades (excluded by default)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_restaurant_events)
