@@ -782,6 +782,10 @@ class ZomatoClient:
                 img_m = re.search(r'"(https://media\.insider\.in/image/[^"]+)"', block)
             image_url = img_m.group(1) if img_m else ""
 
+            # Extract is_activity flag (water parks, go-karting, arcades)
+            is_activity_m = re.search(r'"is_activity"\s*:\s*(true|false)', block)
+            is_activity = is_activity_m.group(1) == "true" if is_activity_m else False
+
             events.append({
                 "title": name,
                 "venue": venue,
@@ -799,6 +803,7 @@ class ZomatoClient:
                 "url": f"{ep.DISTRICT_BASE}/events/{slug}" if slug else "",
                 "start_epoch": epoch,
                 "end_epoch": end_epoch,
+                "is_activity": is_activity,
             })
 
         # Sort by start_epoch (earliest first, 0 = unknown goes last)
@@ -872,6 +877,7 @@ class ZomatoClient:
         city: str = "gurugram",
         when: str = "today",
         query: str = "",
+        nightlife_only: bool = False,
     ) -> list[dict]:
         """Get restaurants that have events on a given day.
 
@@ -882,10 +888,13 @@ class ZomatoClient:
             city: Filter by city (empty = all cities)
             when: 'today', 'tomorrow', 'weekend', or 'YYYY-MM-DD'
             query: Optional keyword filter (e.g. 'sufi', 'live', 'comedy')
+            nightlife_only: Exclude activities (water parks, go-karting, arcades)
 
         Returns list of dicts with keys: restaurant, locality, city, events (list).
         """
         events = self.get_events(city=city, when=when)
+        if nightlife_only:
+            events = [e for e in events if not e.get("is_activity", False)]
         if query:
             q = query.lower()
             events = [

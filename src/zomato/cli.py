@@ -158,6 +158,7 @@ def cmd_restaurant_events(args: argparse.Namespace) -> None:
         city=args.city,
         when=args.when,
         query=args.query,
+        nightlife_only=not args.include_activities,
     )
     if not restaurants:
         print("No restaurants with events found.")
@@ -266,6 +267,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--city", default="gurugram")
     p.add_argument("--when", default="today", help="'today', 'tomorrow', 'weekend', or 'YYYY-MM-DD'")
     p.add_argument("--query", default="", help="Keyword filter (e.g. 'sufi', 'live', 'comedy')")
+    p.add_argument("--include-activities", action="store_true", help="Include water parks, go-karting, arcades (excluded by default)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_restaurant_events)
 
