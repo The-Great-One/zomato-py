@@ -58,20 +58,26 @@ def _print_events(events: list[dict]) -> None:
         title = e.get("title", "Unknown")
         venue = e.get("venue", "")
         city = e.get("city", "")
-        category = e.get("category", "")
+        locality = e.get("locality", "")
         date = e.get("date", "")
         desc = e.get("description", "")
+        tag_line = e.get("tag_line", "")
+        price = e.get("price", "")
+        rating = e.get("rating", "")
         print(f"  {i:2d}. {title}")
         if date:
             print(f"      📅 {date}")
         if venue:
-            print(f"      📍 {venue}")
+            print(f"      📍 {venue}" + (f", {locality}" if locality else ""))
         if city:
             print(f"      🏙️  {city}")
-        if category:
-            print(f"      🎭 {category}")
-        if desc:
-            # Truncate description to 150 chars
+        if price:
+            print(f"      💰 {price}")
+        if rating:
+            print(f"      ⭐ {rating}")
+        if tag_line:
+            print(f"      📝 {tag_line}")
+        elif desc:
             print(f"      📝 {desc[:150]}")
 
 
@@ -144,6 +150,32 @@ def cmd_events(args: argparse.Namespace) -> None:
     _print_events(events)
     if args.json:
         print(json.dumps(events, indent=2, ensure_ascii=False))
+
+
+def cmd_restaurant_events(args: argparse.Namespace) -> None:
+    client = ZomatoClient()
+    restaurants = client.get_restaurant_events(
+        city=args.city,
+        when=args.when,
+        query=args.query,
+    )
+    if not restaurants:
+        print("No restaurants with events found.")
+        return
+    print(f"\n{len(restaurants)} restaurants with events on '{args.when}':\n")
+    for i, r in enumerate(restaurants, 1):
+        print(f"  {i}. {r['restaurant']}")
+        if r.get("locality"):
+            print(f"     📍 {r['locality']}, {r.get('city', '')}")
+        for ev in r.get("events", []):
+            line = f"     → {ev['title']}"
+            if ev.get("date"):
+                line += f" — {ev['date']}"
+            if ev.get("price"):
+                line += f" — {ev['price']}"
+            print(line)
+    if args.json:
+        print(json.dumps(restaurants, indent=2, ensure_ascii=False))
 
 
 def cmd_movies(args: argparse.Namespace) -> None:
@@ -228,6 +260,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_events)
+
+    # restaurant-events
+    p = sub.add_parser("restaurant-events", help="List restaurants having events on a given day")
+    p.add_argument("--city", default="gurugram")
+    p.add_argument("--when", default="today", help="'today', 'tomorrow', 'weekend', or 'YYYY-MM-DD'")
+    p.add_argument("--query", default="", help="Keyword filter (e.g. 'sufi', 'live', 'comedy')")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_restaurant_events)
 
     # movies
     p = sub.add_parser("movies", help="Discover movies near you")

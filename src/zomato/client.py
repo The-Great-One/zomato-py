@@ -760,6 +760,22 @@ class ZomatoClient:
             end_epoch_m = re.search(r'"end_time_epoch"\s*:\s*"?(\d+)"?', block)
             end_epoch = int(end_epoch_m.group(1)) if end_epoch_m else 0
 
+            # Extract locality
+            locality_m = re.search(r'"locality"\s*:\s*"([^"]+)"', block)
+            locality = locality_m.group(1) if locality_m else ""
+
+            # Extract price
+            price_m = re.search(r'"price_string"\s*:\s*"([^"]*)"', block)
+            price = price_m.group(1) if price_m else ""
+            min_price_m = re.search(r'"min_price"\s*:\s*"?(\d+)"?', block)
+            min_price = int(min_price_m.group(1)) if min_price_m else 0
+
+            # Extract rating
+            rating_m = re.search(r'"rating"\s*:\s*"?([\d.]+)"?', block)
+            rating = rating_m.group(1) if rating_m else ""
+            review_m = re.search(r'"review_count"\s*:\s*"?(\d+)"?', block)
+            review_count = int(review_m.group(1)) if review_m else 0
+
             # Extract image
             img_m = re.search(r'"(https://cdn\.district\.in/assets/events/[^"]+)"', block)
             if not img_m:
@@ -770,10 +786,15 @@ class ZomatoClient:
                 "title": name,
                 "venue": venue,
                 "city": city,
+                "locality": locality,
                 "date": date_str,
                 "description": desc,
                 "tag_line": tag_line,
                 "category": "",
+                "price": price,
+                "min_price": min_price,
+                "rating": rating,
+                "review_count": review_count,
                 "image_url": image_url,
                 "url": f"{ep.DISTRICT_BASE}/events/{slug}" if slug else "",
                 "start_epoch": epoch,
@@ -846,7 +867,55 @@ class ZomatoClient:
 
         return filtered
 
-    # ── Public API: Dining ────────────────────────────────────────
+    def get_restaurant_events(
+        self,
+        city: str = "gurugram",
+        when: str = "today",
+        query: str = "",
+    ) -> list[dict]:
+        """Get restaurants that have events on a given day.
+
+        Groups District events by venue and returns a list of restaurants
+        with their upcoming events.
+
+        Args:
+            city: Filter by city (empty = all cities)
+            when: 'today', 'tomorrow', 'weekend', or 'YYYY-MM-DD'
+            query: Optional keyword filter (e.g. 'sufi', 'live', 'comedy')
+
+        Returns list of dicts with keys: restaurant, locality, city, events (list).
+        """
+        events = self.get_events(city=city, when=when)
+        if query:
+            q = query.lower()
+            events = [
+                e for e in events
+                if q in e.get("title", "").lower()
+                or q in e.get("venue", "").lower()
+                or q in e.get("description", "").lower()
+                or q in e.get("tag_line", "").lower()
+            ]
+
+        # Group by venue
+        by_venue: dict[str, dict] = {}
+        for e in events:
+            venue = e.get("venue", "") or "Unknown"
+            if venue not in by_venue:
+                by_venue[venue] = {
+                    "restaurant": venue,
+                    "locality": e.get("locality", ""),
+                    "city": e.get("city", ""),
+                    "events": [],
+                }
+            by_venue[venue]["events"].append({
+                "title": e.get("title", ""),
+                "date": e.get("date", ""),
+                "price": e.get("price", ""),
+                "tag_line": e.get("tag_line", ""),
+                "url": e.get("url", ""),
+            })
+
+        return list(by_venue.values())
 
     def get_dining_slots(self, res_id: int, date: str = "") -> dict:
         """Get available dining time slots for a restaurant."""
