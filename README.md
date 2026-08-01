@@ -109,15 +109,23 @@ with descriptions, organizers, ticket offers, exact coordinates, venue hours,
 facilities, policies, and menus.
 
 ```bash
-# Weekend nightlife near explicit coordinates
-zomato party --when weekend --lat 28.4595 --lng 77.0266
+# Weekend nightlife near explicit coordinates (highest precedence)
+zomato party --when weekend --lat <LAT> --lng <LNG>
 
-# Increase the distance radius and limit results
-zomato party --when weekend --lat 28.4595 --lng 77.0266 --radius 25 -n 10
+# Increase the distance radius
+zomato party --when weekend --lat <LAT> --lng <LNG> --radius 25
 
 # Skip the recursive page crawl when a faster, main-feed-only result is enough
 zomato party --when weekend --no-crawl
+
+# Require an explicit or previously saved location; never launch a browser
+zomato party --no-location-detect
 ```
+
+Party coordinates resolve in this order: a complete `--lat`/`--lng` pair,
+the approved location saved by `zomato location set/detect`, then a browser
+location prompt. Supplying only one explicit coordinate is an error. Use
+`--no-location-detect` to disable the browser fallback.
 
 Activities such as water parks and go-karting remain excluded. Individual-page
 crawling is enabled by default. District access/refresh tokens may optionally
@@ -222,15 +230,35 @@ Hygiene details for Krispy Kreme - Doughnuts & Coffee:
      Quality of sourcing, supply utilities...
 ```
 
-### Search & location
+### Search & approved local location
 
 ```bash
 # Auto-suggest search
 zomato search pizza --city gurugram
 
-# Location search
-zomato location Gurugram
+# Ask the default browser for location permission and save the approved result
+zomato location detect
+
+# Inspect the saved record (also supports --json)
+zomato location show
+
+# Save validated coordinates without opening a browser
+zomato location set --lat <LAT> --lng <LNG>
+
+# Remove the saved record
+zomato location clear
+
+# Search Zomato's location entities
+zomato location search Gurugram
 ```
+
+Approved locations are stored at `~/.zomato-py/location.json`. Writes use an
+atomic replacement and private file permissions where the operating system
+supports them. Browser detection is platform-independent: it opens a minimal
+page served temporarily on IPv4 loopback (`127.0.0.1`) and accepts one
+state-protected callback. Coordinates are persisted only after a successful
+browser permission callback. Permission denial, unavailable location services,
+timeouts, and browser-launch failures leave the saved location unchanged.
 
 ### JSON output
 
@@ -246,12 +274,27 @@ zomato trends --id 3116 --json | jq .
 ### `ZomatoClient`
 
 ```python
-from zomato import ZomatoClient
+from zomato import Location, ZomatoClient
 
 client = ZomatoClient(location=Location(lat=28.45, lng=77.02, city_id=12939))
 ```
 
 #### Location
+
+The approved-location persistence and browser-detection APIs are also exported
+from the package root:
+
+```python
+from zomato import BrowserLocationDetector, LocationRecord, LocationStore
+
+store = LocationStore()  # ~/.zomato-py/location.json
+saved = store.load()
+if saved is None:
+    saved = BrowserLocationDetector(store=store).detect(timeout=60)
+```
+
+`LocationError`, `LocationStorageError`, and `LocationDetectionError` are public
+for callers that need to handle persistence and browser-approval failures.
 
 | Method | Description |
 |--------|-------------|

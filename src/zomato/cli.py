@@ -5,8 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 
 from .client import ZomatoClient
+from .location import (
+    BrowserLocationDetector,
+    LocationDetectionError,
+    LocationRecord,
+    LocationStore,
+)
 
 
 def _print_restaurants(restaurants: list[dict]) -> None:
@@ -220,12 +227,63 @@ def cmd_search(args: argparse.Namespace) -> None:
     print(json.dumps(results, indent=2, ensure_ascii=False))
 
 
-def cmd_location(args: argparse.Namespace) -> None:
+def cmd_location_search(args: argparse.Namespace) -> None:
     client = ZomatoClient()
     locations = client.search_location(query=args.query)
     _print_locations(locations)
     if args.json:
         print(json.dumps(locations, indent=2, ensure_ascii=False))
+
+
+def _print_location_record(location: LocationRecord, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(location.to_dict(), indent=2, ensure_ascii=False))
+        return
+    accuracy = "unknown" if location.accuracy is None else f"{location.accuracy:g} m"
+    print(f"Latitude: {location.latitude}")
+    print(f"Longitude: {location.longitude}")
+    print(f"Accuracy: {accuracy}")
+    print(f"Source: {location.source}")
+    print(f"Approved at: {location.approved_at}")
+
+
+def cmd_location_detect(args: argparse.Namespace) -> None:
+    """Request browser geolocation approval and persist the result."""
+    store = LocationStore()
+    location = BrowserLocationDetector(store=store).detect(timeout=args.timeout)
+    _print_location_record(location, as_json=args.json)
+
+
+def cmd_location_show(args: argparse.Namespace) -> None:
+    """Show the currently persisted approved location."""
+    location = LocationStore().load()
+    if location is None:
+        raise ValueError(
+            "No approved location is saved; use zomato location set or zomato location detect."
+        )
+    _print_location_record(location, as_json=args.json)
+
+
+def cmd_location_set(args: argparse.Namespace) -> None:
+    """Validate and persist manually supplied coordinates."""
+    location = LocationRecord(
+        latitude=args.lat,
+        longitude=args.lng,
+        accuracy=args.accuracy,
+        source="manual",
+        approved_at=datetime.now(timezone.utc).isoformat(),
+    )
+    LocationStore().save(location)
+    _print_location_record(location, as_json=args.json)
+
+
+def cmd_location_clear(args: argparse.Namespace) -> None:
+    """Clear any persisted approved location."""
+    cleared = LocationStore().clear()
+    if args.json:
+        print(json.dumps({"cleared": cleared}))
+    else:
+        print("Saved location cleared." if cleared else "No saved location to clear.")
 
 
 def cmd_collections(args: argparse.Namespace) -> None:
@@ -355,16 +413,64 @@ def cmd_value(args: argparse.Namespace) -> None:
         print(json.dumps(value, indent=2, ensure_ascii=False))
 
 
+def _location_guidance() -> str:
+    return "use --lat/--lng or zomato location set/detect"
+
+
+def _resolve_party_coordinates(
+    args: argparse.Namespace,
+    *,
+    store: LocationStore | None = None,
+    detector: BrowserLocationDetector | None = None,
+) -> tuple[float, float]:
+    """Resolve coordinates by explicit, persisted, then browser precedence."""
+    has_latitude = args.lat is not None
+    has_longitude = args.lng is not None
+    if has_latitude != has_longitude:
+        raise ValueError("--lat and --lng must be supplied together")
+    if has_latitude:
+        explicit = LocationRecord(
+            latitude=args.lat,
+            longitude=args.lng,
+            accuracy=None,
+            source="explicit",
+            approved_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return explicit.latitude, explicit.longitude
+
+    store = store or LocationStore()
+    persisted = store.load()
+    if persisted is not None:
+        return persisted.latitude, persisted.longitude
+
+    if args.no_location_detect:
+        raise ValueError(
+            "No approved location is saved and browser detection is disabled; "
+            "use --lat/--lng, zomato location set, or zomato location detect."
+        )
+
+    detector = detector or BrowserLocationDetector(store=store)
+    try:
+        detected = detector.detect(timeout=args.location_timeout)
+    except LocationDetectionError as exc:
+        raise ValueError(f"Location detection failed: {exc}; {_location_guidance()}.") from exc
+    return detected.latitude, detected.longitude
+
+
 def cmd_party(args: argparse.Namespace) -> None:
     """Find party places near you."""
     client = ZomatoClient()
-    if args.lat and args.lng:
-        client.set_location(lat=args.lat, lng=args.lng)
+    store = LocationStore()
+    detector = BrowserLocationDetector(store=store)
+    latitude, longitude = _resolve_party_coordinates(
+        args, store=store, detector=detector
+    )
+    client.set_location(lat=latitude, lng=longitude)
     if args.city:
         client.set_location(city=args.city)
     places = client.find_party_places(
-        lat=args.lat,
-        lng=args.lng,
+        lat=latitude,
+        lng=longitude,
         radius_km=args.radius,
         when=args.when,
         include_offers=not args.no_offers,
@@ -471,10 +577,37 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_search)
 
     # location
-    p = sub.add_parser("location", help="Search for Zomato locations")
-    p.add_argument("query", help="Location name (e.g. 'Gurugram')")
-    p.add_argument("--json", action="store_true")
-    p.set_defaults(func=cmd_location)
+    p = sub.add_parser("location", help="Manage an approved local location")
+    location_sub = p.add_subparsers(dest="location_command", required=True)
+
+    location_detect = location_sub.add_parser(
+        "detect", help="Approve location access in your web browser"
+    )
+    location_detect.add_argument("--timeout", type=float, default=60.0)
+    location_detect.add_argument("--json", action="store_true")
+    location_detect.set_defaults(func=cmd_location_detect)
+
+    location_show = location_sub.add_parser("show", help="Show the saved location")
+    location_show.add_argument("--json", action="store_true")
+    location_show.set_defaults(func=cmd_location_show)
+
+    location_set = location_sub.add_parser("set", help="Save explicit coordinates")
+    location_set.add_argument("--lat", type=float, required=True)
+    location_set.add_argument("--lng", type=float, required=True)
+    location_set.add_argument("--accuracy", type=float, default=None)
+    location_set.add_argument("--json", action="store_true")
+    location_set.set_defaults(func=cmd_location_set)
+
+    location_clear = location_sub.add_parser("clear", help="Clear the saved location")
+    location_clear.add_argument("--json", action="store_true")
+    location_clear.set_defaults(func=cmd_location_clear)
+
+    location_search = location_sub.add_parser(
+        "search", help="Search Zomato location entities"
+    )
+    location_search.add_argument("query", help="Location name (e.g. 'Gurugram')")
+    location_search.add_argument("--json", action="store_true")
+    location_search.set_defaults(func=cmd_location_search)
 
     # collections
     p = sub.add_parser("collections", help="Get curated collections for a city")
@@ -518,6 +651,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--city", default="gurugram", help="City name")
     p.add_argument("--lat", type=float, default=None, help="Your latitude")
     p.add_argument("--lng", type=float, default=None, help="Your longitude")
+    p.add_argument(
+        "--no-location-detect",
+        action="store_true",
+        help="Do not open a browser when no approved location is saved",
+    )
+    p.add_argument(
+        "--location-timeout",
+        type=float,
+        default=60.0,
+        help="Seconds to wait for browser location approval (default: 60)",
+    )
     p.add_argument("--radius", type=float, default=15, help="Max distance in km (default: 15)")
     p.add_argument("--when", default="weekend", help="'today', 'tomorrow', 'weekend', 'YYYY-MM-DD', or empty for all")
     p.add_argument("--no-offers", action="store_true", help="Skip fetching dining offers")
