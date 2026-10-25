@@ -1,11 +1,63 @@
+<div align="center">
+
+<img src="https://via.placeholder.com/120x120.png?text=Zomato" alt="zomato-py logo" width="120" height="120" />
+
 # zomato-py
 
-Unofficial Python client for Zomato's web API. No API key required —
-reverse-engineered from Zomato's web frontend. Discover restaurants, read
-reviews, browse collections, find events, track rating trends, extract
+**Unofficial Python client for Zomato's web API. No API key required.**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![GitHub issues](https://img.shields.io/github/issues/The-Great-One/zomato-py)](https://github.com/The-Great-One/zomato-py/issues)
+[![GitHub pull requests](https://img.shields.io/github/issues-pr/The-Great-One/zomato-py)](https://github.com/The-Great-One/zomato-py/pulls)
+[![GitHub stars](https://img.shields.io/github/stars/The-Great-One/zomato-py?style=social)](https://github.com/The-Great-One/zomato-py/stargazers)
+
+[Report Bug](https://github.com/The-Great-One/zomato-py/issues/new?template=bug_report.md) · [Request Feature](https://github.com/The-Great-One/zomato-py/issues/new?template=feature_request.md)
+
+</div>
+
+---
+
+## Table of Contents
+
+- [About](#about)
+- [Features](#features)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+- [Usage](#usage)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
+- [Contact](#contact)
+- [Acknowledgments](#acknowledgments)
+
+---
+
+## About
+
+`zomato-py` is an unofficial Python client for Zomato's web API. No API key
+required — reverse-engineered from Zomato's web frontend. Discover restaurants,
+read reviews, browse collections, find events, track rating trends, extract
 popular dishes, and more.
 
-## Install
+## Features
+
+- ✅ Discover restaurants, read reviews, browse collections
+- ✅ Find events (District by Zomato), track rating trends
+- ✅ Extract popular dishes, value-for-money analysis
+- ✅ Hygiene details, dining slots, menus, offers
+- ✅ Persistent session (CSRF + cookies, auto-refresh)
+- ✅ Location detection via browser (loopback callback)
+- ✅ `--json` output on all commands
+- ✅ No authentication required (guest-first)
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.10+
+
+### Installation
 
 ```bash
 git clone https://github.com/The-Great-One/zomato-py.git
@@ -15,7 +67,9 @@ pip install -e .
 
 The CLI is symlinked to `/usr/local/bin/zomato` after install.
 
-## Quick start
+## Usage
+
+### Quick start
 
 ```python
 from zomato import ZomatoClient
@@ -42,13 +96,13 @@ for e in events:
     print(e["title"], e["venue"], e["date"], e["category"])
 ```
 
-## CLI usage
+### CLI usage
 
 ```
 zomato --help
 ```
 
-### Restaurants
+#### Restaurants
 
 ```bash
 # Search restaurants in a city
@@ -67,7 +121,7 @@ zomato reviews --id 308020 --limit 10
 zomato collections --city gurugram
 ```
 
-### Events
+#### Events
 
 ```bash
 # All upcoming events
@@ -78,7 +132,6 @@ zomato events --city gurugram --when today
 
 # Filter by keyword
 zomato events --query comedy
-zomato events --query "live music"
 
 # Filter by category
 zomato events --category comedy
@@ -99,44 +152,26 @@ zomato restaurant-events --include-activities
 zomato movies --city gurugram
 ```
 
-### Party and nightlife discovery
+#### Party and nightlife discovery
 
 `zomato party` combines District's main feed with a recursive crawl of every
-linked venue guide. Venue pages are loaded through District's client-side API,
-and event links found only inside venue rails are then crawled individually.
-This finds listings that the curated `/events` page omits and enriches results
-with descriptions, organizers, ticket offers, exact coordinates, venue hours,
-facilities, policies, and menus.
+linked venue guide.
 
 ```bash
-# Weekend nightlife near explicit coordinates (highest precedence)
+# Weekend nightlife near explicit coordinates
 zomato party --when weekend --lat <LAT> --lng <LNG>
 
 # Increase the distance radius
 zomato party --when weekend --lat <LAT> --lng <LNG> --radius 25
 
-# Skip the recursive page crawl when a faster, main-feed-only result is enough
+# Skip the recursive page crawl
 zomato party --when weekend --no-crawl
 
-# Require an explicit or previously saved location; never launch a browser
+# Require an explicit or previously saved location
 zomato party --no-location-detect
 ```
 
-Party coordinates resolve in this order: a complete `--lat`/`--lng` pair,
-the approved location saved by `zomato location set/detect`, then a browser
-location prompt. Supplying only one explicit coordinate is an error. Use
-`--no-location-detect` to disable the browser fallback.
-
-Activities such as water parks and go-karting remain excluded. Individual-page
-crawling is enabled by default. District access/refresh tokens may optionally
-be supplied via `DISTRICT_ACCESS_TOKEN` and `DISTRICT_REFRESH_TOKEN`; otherwise
-the unauthenticated guest web flow is used.
-
-### Rating trends
-
-Track how a restaurant's rating changes over time. Fetches historical
-reviews, groups by month, and shows whether the trend is up, down, or
-stable.
+#### Rating trends
 
 ```bash
 # Show rating trends for last 6 months
@@ -146,103 +181,44 @@ zomato trends --id 3116 --months 6
 zomato trends --id 3116 --months 24
 ```
 
-Output:
-```
-Cafe Festa — Current: 0★
-  Rating trend (last 24 months):
-
-  2019-06  ████████████░░░░░░░░░░░░░ 5.0  (20 reviews) ➡️
-  2018-12  ███████░░░░░░░░░░░░░░░░░░ 3.0  (20 reviews) 📉
-  2018-09  ██████░░░░░░░░░░░░░░░░░░░ 2.5  (40 reviews) 📉
-  2018-07  ██████████░░░░░░░░░░░░░░░ 4.0  (20 reviews) 📈
-```
-
-### Popular dishes
-
-Extracts dish mentions from review text and review tags.
+#### Popular dishes
 
 ```bash
 # Most mentioned dishes
 zomato dishes --id 308020 --limit 10
 ```
 
-Output:
-```
-Most mentioned dishes at Krispy Kreme - Doughnuts & Coffee:
-
-   1. Donut                ▓▓▓▓▓▓▓▓▓▓ 10 mentions 1.0★
-   2. Chocolate            ▓▓▓▓▓▓▓▓▓▓ 10 mentions 1.0★
-```
-
-### Value for money
-
-Calculates cost-per-rating to identify whether a restaurant is good value.
+#### Value for money
 
 ```bash
 zomato value --id 308020
 ```
 
-Output:
-```
-Krispy Kreme - Doughnuts & Coffee
-  Rating:        3.8★
-  Cost for two:  300
-  Cost per ★:   78.95
-  Verdict:       💚 great value
-```
-
-Verdicts:
-- 💚 great value — cost per rating < 100
-- 💛 good — cost per rating 100-200
-- ❤️ pricey — cost per rating > 200
-
-### Offers
+#### Offers
 
 ```bash
 zomato offers --id 308020
 ```
 
-### Hygiene details
-
-Shows Zomato's food hygiene audit sections for a restaurant.
+#### Hygiene details
 
 ```bash
 zomato hygiene --id 308020
 ```
 
-Output:
-```
-Hygiene details for Krispy Kreme - Doughnuts & Coffee:
-
-  Valid until:   1st Jan'70
-  Last audit:    1st Jan'70
-  Premises and pest control
-     Restaurant's license compliance status...
-  Equipment and packaging
-     Quality and upkeep of equipment...
-  Raw material handling
-     Procurement and storage of raw materials...
-  Food processing
-     Safety practices followed through cooking...
-  Personal hygiene
-     Standards of personal hygiene maintained...
-  Water supply and disposal
-     Quality of sourcing, supply utilities...
-```
-
-### Search & approved local location
+#### Search & approved local location
 
 ```bash
 # Auto-suggest search
 zomato search pizza --city gurugram
 
-# Ask the default browser for location permission and save the approved result
+# Ask the default browser for location permission
 zomato location detect
 
-# Inspect the saved record (also supports --json)
+# Inspect the saved record
 zomato location show
 
-# Save validated coordinates without opening a browser
+# Save validated coordinates
 zomato location set --lat <LAT> --lng <LNG>
 
 # Remove the saved record
@@ -252,15 +228,7 @@ zomato location clear
 zomato location search Gurugram
 ```
 
-Approved locations are stored at `~/.zomato-py/location.json`. Writes use an
-atomic replacement and private file permissions where the operating system
-supports them. Browser detection is platform-independent: it opens a minimal
-page served temporarily on IPv4 loopback (`127.0.0.1`) and accepts one
-state-protected callback. Coordinates are persisted only after a successful
-browser permission callback. Permission denial, unavailable location services,
-timeouts, and browser-launch failures leave the saved location unchanged.
-
-### JSON output
+#### JSON output
 
 All commands support `--json` for machine-readable output:
 
@@ -269,9 +237,9 @@ zomato reviews --id 308020 --json | jq .
 zomato trends --id 3116 --json | jq .
 ```
 
-## API reference
+### API reference
 
-### `ZomatoClient`
+#### `ZomatoClient`
 
 ```python
 from zomato import Location, ZomatoClient
@@ -279,10 +247,7 @@ from zomato import Location, ZomatoClient
 client = ZomatoClient(location=Location(lat=28.45, lng=77.02, city_id=12939))
 ```
 
-#### Location
-
-The approved-location persistence and browser-detection APIs are also exported
-from the package root:
+##### Location
 
 ```python
 from zomato import BrowserLocationDetector, LocationRecord, LocationStore
@@ -293,15 +258,7 @@ if saved is None:
     saved = BrowserLocationDetector(store=store).detect(timeout=60)
 ```
 
-`LocationError`, `LocationStorageError`, and `LocationDetectionError` are public
-for callers that need to handle persistence and browser-approval failures.
-
-| Method | Description |
-|--------|-------------|
-| `search_location(query)` | Search for Zomato location entities |
-| `get_location(lat, lng)` | Get location details for coordinates |
-
-#### Restaurants
+##### Restaurants
 
 | Method | Description |
 |--------|-------------|
@@ -310,7 +267,7 @@ for callers that need to handle persistence and browser-approval failures.
 | `get_collections(city)` | Get curated collections for a city |
 | `auto_suggest(query)` | Get search auto-suggestions |
 
-#### Reviews
+##### Reviews
 
 | Method | Description |
 |--------|-------------|
@@ -318,7 +275,7 @@ for callers that need to handle persistence and browser-approval failures.
 | `get_rating_trends(res_id, months)` | Monthly avg rating with trend direction |
 | `get_popular_dishes(res_id, limit)` | Most mentioned dishes from reviews |
 
-#### Events (District by Zomato)
+##### Events (District by Zomato)
 
 | Method | Description |
 |--------|-------------|
@@ -326,7 +283,7 @@ for callers that need to handle persistence and browser-approval failures.
 | `get_restaurant_events(city, when, query)` | Group events by restaurant/venue |
 | `get_movies(city)` | Get movies from District |
 
-#### Extra features
+##### Extra features
 
 | Method | Description |
 |--------|-------------|
@@ -336,7 +293,7 @@ for callers that need to handle persistence and browser-approval failures.
 | `get_dining_slots(res_id, date)` | Available table time slots |
 | `get_menu(res_id)` | Full restaurant menu |
 
-#### Utility
+##### Utility
 
 | Method | Description |
 |--------|-------------|
@@ -344,57 +301,33 @@ for callers that need to handle persistence and browser-approval failures.
 
 ### Event classification
 
-Events are automatically classified into categories:
-- Comedy — standup, comedy, laugh
-- Live Music — live, concert, acoustic, band, qawwal
-- Party / Nightlife — party, club, DJ, night
-- Food & Drink — brunch, culinary, festival, tasting
-- Theatre / Performance — theatre, play, performance
-- Watch Party — screening, watch party
-- Activity / Adventure — water park, go-karting, arcade
+Events are automatically classified into categories: Comedy, Live Music,
+Party / Nightlife, Food & Drink, Theatre / Performance, Watch Party,
+Activity / Adventure.
 
-### Event fields
-
-Each event dict contains: title, venue, city, locality, date, description,
-tag_line, category, price, min_price, rating, review_count, image_url, url,
-start_epoch, end_epoch, is_activity, address, offer_string,
-popularity_score, number_attended, distance, lat, long, date_string_v2.
-
-## Persistent session
+### Persistent session
 
 The client saves CSRF tokens and cookies to `~/.zomato-py/session.json`
-automatically. Subsequent runs reuse the cached session, avoiding
-unnecessary CSRF token fetches. The session expires after 30 minutes and
-is refreshed automatically.
+automatically. Subsequent runs reuse the cached session. The session expires
+after 30 minutes and is refreshed automatically.
 
-## How it works
+### How it works
 
-1. **CSRF**: Acquires a token from `/webroutes/auth/csrf`, sends it as
-   header `x-zomato-csrft` on requests that need it.
-2. **Location**: The `locus` cookie (JSON with cityId, lat, lng) determines
-   the user's city. Server-side IP geolocation may override this for
-   restaurant search results.
-3. **Restaurant search**: `/webroutes/getPage?url=/{city}/restaurants`
-   returns `SECTION_SEARCH_RESULT` with restaurant cards.
+1. **CSRF**: Acquires a token from `/webroutes/auth/csrf`.
+2. **Location**: The `locus` cookie determines the user's city.
+3. **Restaurant search**: `/webroutes/getPage` returns `SECTION_SEARCH_RESULT`.
 4. **Reviews**: `/webroutes/reviews/loadMore` returns reviews in
-   `entities.REVIEWS` keyed by review ID. Each review has `ratingV2`,
-   `reviewText`, `timestamp`, `reviewTags`, and `experience` type.
-5. **Events**: District.in uses Next.js RSC (React Server Components).
-   Data streams via `self.__next_f.push()` payloads. Event data is
-   extracted from `ItemDetails` blocks (EventData, VenueData, ArtistData).
+   `entities.REVIEWS`.
+5. **Events**: District.in uses Next.js RSC; data streams via
+   `self.__next_f.push()` payloads.
 
-## Limitations
+### Limitations
 
-- Restaurant search results are IP-geolocated — the server assigns a
-  delivery subzone (dszId) based on IP, not the `locus` cookie. Search may
-  return restaurants from a nearby subzone rather than the exact city
-  center. Restaurant details, reviews, and events are not affected.
-- No authentication — user-specific endpoints (orders, bookmarks,
-  profile) require login and are not supported.
-- Event data depends on District.in's RSC payload format, which may
-  change without notice.
+- Restaurant search results are IP-geolocated.
+- No authentication — user-specific endpoints are not supported.
+- Event data depends on District.in's RSC payload format.
 
-## Testing
+### Testing
 
 ```bash
 # Unit tests (mocked, no network)
@@ -404,6 +337,32 @@ python -m pytest tests/test_client.py -q
 ZOMATO_LIVE=1 python -m pytest tests/test_smoke.py -q
 ```
 
+## Roadmap
+
+- [x] v0.1 – Restaurant search, details, reviews
+- [x] v0.1 – Events, rating trends, popular dishes
+- [ ] v0.2 – Packaged release
+- [ ] v1.0 – Stable API
+
+See the open issues for the full list of proposed features and known bugs.
+
+## Contributing
+
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and
+follow our [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## License
 
-MIT
+Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
+
+## Contact
+
+Sahil Goel – [@The-Great-One](https://github.com/The-Great-One) –
+sahilgoel187@gmail.com
+
+Project link: [https://github.com/The-Great-One/zomato-py](https://github.com/The-Great-One/zomato-py)
+
+## Acknowledgments
+
+- [Img Shields](https://shields.io)
+- [Contributor Covenant](https://www.contributor-covenant.org)
