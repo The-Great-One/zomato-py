@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://via.placeholder.com/120x120.png?text=Zomato" alt="zomato-py logo" width="120" height="120" />
+<img src="icon.png" alt="zomato-py logo" width="120" height="120" />
 
 # zomato-py
 
