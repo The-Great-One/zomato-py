@@ -9,3 +9,14 @@ build/
 .pytest_cache/
 *.json
 !tests/fixtures/*.json
+
+
+# ─── OS files ─────────────────────────────
+.DS_Store
+._*
+Thumbs.db
+
+# ─── IDE ──────────────────────────────────
+.vscode/
+.idea/
+*.sw?
